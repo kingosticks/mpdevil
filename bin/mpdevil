@@ -2411,10 +2411,10 @@ class Browser(Gtk.Paned):
 		self._use_csd=self._settings.get_boolean("use-csd")
 
 		# widgets
-		self.back_to_current_album_button=Gtk.Button(icon_name="go-previous-symbolic",tooltip_text=_("Back to current album"),can_focus=False)
+		self.back_button=Gtk.Button(icon_name="go-previous-symbolic",tooltip_text=_("Back to current album"),can_focus=False)
 		self.search_button=Gtk.ToggleButton(icon_name="system-search-symbolic", tooltip_text=_("Search"), can_focus=False)
 		if not self._use_csd:
-			self._settings.bind("icon-size-sec", self.back_to_current_album_button.get_child(), "pixel-size", Gio.SettingsBindFlags.GET)
+			self._settings.bind("icon-size-sec", self.back_button.get_child(), "pixel-size", Gio.SettingsBindFlags.GET)
 			self._settings.bind("icon-size-sec", self.search_button.get_child(), "pixel-size", Gio.SettingsBindFlags.GET)
 		self._genre_select=GenreSelect(self._client)
 		self._artist_window=ArtistWindow(self._client, self._settings, self._genre_select)
@@ -2423,16 +2423,18 @@ class Browser(Gtk.Paned):
 
 		# event controllers TODO
 		gesture_click_button1=Gtk.GestureClick(button=1)
-		self.back_to_current_album_button.add_controller(gesture_click_button1)
+		self.back_button.add_controller(gesture_click_button1)
 		gesture_click_button1.connect("pressed", self._on_gesture_click_pressed)
 
 		# connect
-		self.back_to_current_album_button.connect("clicked", self._on_back_to_current_album_button_clicked)
+		self.back_button.connect("clicked", self._on_back_button_clicked)
 		self.search_button.connect("toggled", self._on_search_toggled)
 		self._artist_window.connect("artists_changed", self._on_artists_changed)
-		self._settings.connect("notify::mini-player", self._on_mini_player)
 		self._client.emitter.connect("disconnected", self._on_disconnected)
 		self._client.emitter.connect("reconnected", self._on_reconnected)
+		self._settings.bind("mini-player", self, "visible", Gio.SettingsBindFlags.INVERT_BOOLEAN|Gio.SettingsBindFlags.GET)
+		self._settings.bind("mini-player", self.back_button, "visible", Gio.SettingsBindFlags.INVERT_BOOLEAN|Gio.SettingsBindFlags.GET)
+		self._settings.bind("mini-player", self.search_button, "visible", Gio.SettingsBindFlags.INVERT_BOOLEAN|Gio.SettingsBindFlags.GET)
 
 		# packing
 		self._stack=Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE)
@@ -2442,7 +2444,7 @@ class Browser(Gtk.Paned):
 		if self._use_csd:
 			hbox.append(self._genre_select)
 		else:
-			hbox.append(self.back_to_current_album_button)
+			hbox.append(self.back_button)
 			hbox.append(self._genre_select)
 			hbox.append(self.search_button)
 		box1=Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -2471,7 +2473,7 @@ class Browser(Gtk.Paned):
 				self._artist_window.select(artist)
 			self._album_window.scroll_to_current_album()
 
-	def _on_back_to_current_album_button_clicked(self, *args):
+	def _on_back_button_clicked(self, *args):
 		self._back_to_current_album()
 
 	def _on_gesture_click_pressed(self, controller, n_press, x, y):
@@ -2486,22 +2488,16 @@ class Browser(Gtk.Paned):
 			self._stack.set_visible_child_name("albums")
 
 	def _on_reconnected(self, *args):
-		self.back_to_current_album_button.set_sensitive(True)
+		self.back_button.set_sensitive(True)
 		self.search_button.set_sensitive(True)
 
 	def _on_disconnected(self, *args):
-		self.back_to_current_album_button.set_sensitive(False)
+		self.back_button.set_sensitive(False)
 		self.search_button.set_active(False)
 		self.search_button.set_sensitive(False)
 
 	def _on_artists_changed(self, *args):
 		self.search_button.set_active(False)
-
-	def _on_mini_player(self, obj, typestring):
-		state=obj.get_property("mini-player")
-		self.set_property("visible", not(state))
-		self.back_to_current_album_button.set_property("visible", not(state))
-		self.search_button.set_property("visible", not(state))
 
 ######################
 # playlist and cover #
@@ -2847,9 +2843,9 @@ class PlaylistWindow(Gtk.Box):
 		self._client.emitter.connect("reconnected", self._on_reconnected)
 		self._client.emitter.connect("show-info", self._on_show_info)
 
-		self._settings.connect("notify::mini-player", self._on_mini_player)
 		self._settings.connect("changed::column-visibilities", self._load_settings)
 		self._settings.connect("changed::column-permutation", self._load_settings)
+		self._settings.bind("mini-player", self, "visible", Gio.SettingsBindFlags.INVERT_BOOLEAN|Gio.SettingsBindFlags.GET)
 
 		# packing
 		self.append(self._frame)
@@ -3025,16 +3021,6 @@ class PlaylistWindow(Gtk.Box):
 				cell=self._treeview.get_cell_area(path, None)
 				x,y=self._treeview.convert_bin_window_to_widget_coords(cell.x, cell.y)
 				self._song_popover.open(self._store[path][8], x, y)
-
-	def _on_mini_player(self, obj, typestring):
-		# TODO
-		if obj.get_property("mini-player"):
-#			self.set_property("no-show-all", True)
-			self.set_property("visible", False)
-		else:
-			self.set_property("visible", True)
-#			self.set_property("no-show-all", False)
-#			self.show_all()
 
 class CoverPlaylistWindow(Gtk.Paned):
 	def __init__(self, client, settings):
@@ -3404,7 +3390,7 @@ class PlaybackOptions(Gtk.Box):
 		self._client.emitter.connect("single", self._single_refresh)
 		self._client.emitter.connect("disconnected", self._on_disconnected)
 		self._client.emitter.connect("reconnected", self._on_reconnected)
-		self._settings.connect("notify::mini-player", self._on_mini_player)
+		self._settings.bind("mini-player", self, "visible", Gio.SettingsBindFlags.INVERT_BOOLEAN|Gio.SettingsBindFlags.GET)
 
 	def _set_option(self, widget, option):
 		func=getattr(self._client, option)
@@ -3442,9 +3428,6 @@ class PlaybackOptions(Gtk.Box):
 
 	def _on_reconnected(self, *args):
 		self.set_sensitive(True)
-
-	def _on_mini_player(self, obj, typestring):
-		self.set_property("visible", not(obj.get_property("mini-player")))
 
 ###################
 # MPD gio actions #
@@ -3746,7 +3729,7 @@ class MainWindow(Gtk.ApplicationWindow):
 		if self._use_csd:
 			self._header_bar=Gtk.HeaderBar(title_widget=Title())
 			self.set_titlebar(self._header_bar)
-			self._header_bar.pack_start(self._browser.back_to_current_album_button)
+			self._header_bar.pack_start(self._browser.back_button)
 			self._header_bar.pack_end(self._menu_button)
 			self._header_bar.pack_end(self._browser.search_button)
 		else:
@@ -3764,14 +3747,10 @@ class MainWindow(Gtk.ApplicationWindow):
 		while main.pending():
 			main.iteration()
 		# restore paned settings when window is visible (fixes a bug when window is maximized)
-		self._cover_playlist_window.set_position(self._settings.get_int("paned0"))
-		self._browser.set_position(self._settings.get_int("paned1"))
-		self._paned.set_position(self._settings.get_int("paned2"))
-
-		# auto save paned positions
-		self._cover_playlist_window.connect("notify::position", self._on_paned_position, "paned0")
-		self._browser.connect("notify::position", self._on_paned_position, "paned1")
-		self._paned.connect("notify::position", self._on_paned_position, "paned2")
+		# auto save and restore paned positions
+		self._settings.bind("paned0", self._cover_playlist_window, "position", Gio.SettingsBindFlags.DEFAULT)
+		self._settings.bind("paned1", self._browser, "position", Gio.SettingsBindFlags.DEFAULT)
+		self._settings.bind("paned2", self._paned, "position", Gio.SettingsBindFlags.DEFAULT)
 
 		# start client
 		def callback(*args):
@@ -3783,7 +3762,7 @@ class MainWindow(Gtk.ApplicationWindow):
 		self._cover_playlist_window.lyrics_button.set_active(not(self._cover_playlist_window.lyrics_button.get_active()))
 
 	def _on_back_to_current_album(self, action, param):
-		self._browser.back_to_current_album_button.emit("clicked")
+		self._browser.back_button.emit("clicked")
 
 	def _on_toggle_search(self, action, param):
 		self._browser.search_button.set_active(not(self._browser.search_button.get_active()))
@@ -3864,9 +3843,6 @@ class MainWindow(Gtk.ApplicationWindow):
 			self._header_bar.get_title_widget().set_subtitle("")
 		for action in ("stats","toggle-lyrics","back-to-current-album","toggle-search"):
 			self.lookup_action(action).set_enabled(False)
-
-	def _on_paned_position(self, obj, typestring, key):
-		self._settings.set_int(key, obj.get_position())
 
 	def _on_mini_player(self, obj, typestring):
 		if obj.get_property("mini-player"):
