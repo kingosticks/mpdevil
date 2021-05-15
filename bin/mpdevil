@@ -1241,7 +1241,6 @@ class SettingsDialog(Gtk.Dialog):
 			tabs.append_page(profiles, Gtk.Label(label=_("Profiles")))
 			tabs.append_page(playlist, Gtk.Label(label=_("Playlist")))
 			vbox.set_property("spacing", 6)
-#			vbox.set_property("border-width", 6) TODO
 			vbox.append(tabs)
 		self.show()
 		if use_csd:
@@ -1285,9 +1284,8 @@ class ServerStats(Gtk.Dialog):
 
 		# packing
 		vbox=self.get_content_area()
-#		vbox.set_property("border-width", 6) TODO
 		vbox.append(grid)
-		self.show() # TODO
+		self.show()
 
 class AboutDialog(Gtk.AboutDialog):
 	def __init__(self, window):
@@ -1872,7 +1870,6 @@ class SearchWindow(Gtk.Box):
 							int_track
 					])
 					if i%100 == 0:
-						#TODO
 						main=GLib.main_context_default()
 						while main.pending():
 							main.iteration()
@@ -2253,7 +2250,6 @@ class AlbumWindow(FocusFrame):
 						if i > 0:  # more than one artist to show (all artists)
 							self._progress_bar.pulse()
 						albums.extend(self._client.get_albums(artist, genre))
-						#TODO
 						main=GLib.main_context_default()
 						while main.pending():
 							main.iteration()
