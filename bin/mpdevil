@@ -3882,7 +3882,7 @@ class mpdevil(Gtk.Application):
 	def do_activate(self):
 		if not self._window:  # allow just one instance
 			self._window=MainWindow(self, self._client, self._settings)
-			self._window.connect("destroy", self._on_delete_event)
+			self._window.connect("destroy", self._quit)
 			self._window.insert_action_group("mpd", MPDActionGroup(self._client))
 			# accelerators
 			action_accels=(
@@ -3909,18 +3909,13 @@ class mpdevil(Gtk.Application):
 		self.add_action(action)
 
 		action=Gio.SimpleAction.new("quit", None)
-		action.connect("activate", self._on_quit)
+		action.connect("activate", self._quit)
 		self.add_action(action)
-
-	def _on_delete_event(self, *args):
-		if self._settings.get_boolean("stop-on-quit") and self._client.connected():
-			self._client.stop()
-		self.quit()
 
 	def _on_about(self, action, param):
 		dialog=AboutDialog(self._window)
 
-	def _on_quit(self, action, param):
+	def _quit(self, *args):
 		if self._settings.get_boolean("stop-on-quit") and self._client.connected():
 			self._client.stop()
 		self.quit()
