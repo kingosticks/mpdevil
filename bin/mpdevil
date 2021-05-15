@@ -1993,7 +1993,6 @@ class ArtistWindow(FocusFrame):
 		self._settings.connect("changed::use-album-artist", self._refresh)
 		self._client.emitter.connect("disconnected", self._on_disconnected)
 		self._client.emitter.connect("reconnected", self._on_reconnected)
-		self._client.emitter.connect("update", self._refresh)
 		self._client.emitter.connect("add-to-playlist", self._on_add_to_playlist)
 		self._client.emitter.connect("show-info", self._on_show_info)
 		self.genre_select.connect("genre_changed", self._refresh)
