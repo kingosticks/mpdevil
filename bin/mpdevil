@@ -18,7 +18,7 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import gi
-gi.require_version("Gtk", "3.0")
+gi.require_version("Gtk", "4.0")
 gi.require_version("Notify", "0.7")
 from gi.repository import Gtk, Gio, Gdk, GdkPixbuf, Pango, GObject, GLib, Notify
 from mpd import MPDClient, base as MPDBase
@@ -36,8 +36,18 @@ if os.path.isfile("/.flatpak-info"):  # test for flatpak environment
 else:
 	bindtextdomain("mpdevil", localedir=None)  # replace "None" by a static path if needed (e.g when installing on a non-FHS distro)
 
-VERSION="1.2.1"  # sync with setup.py
+VERSION="1.2.0-gtk4"  # sync with setup.py
 COVER_REGEX=r"^\.?(album|cover|folder|front).*\.(gif|jpeg|jpg|png)$"
+
+class WorkAroundListStore(Gtk.ListStore):
+	'''work around defect ".append"'''
+	def __init__(self, *args):
+		super().__init__(*args)
+
+	def append(self, *args):
+		treeiter=super(WorkAroundListStore, self).append()
+		row=list(sum(list(enumerate(*args)), ()))
+		self.set(treeiter, *row)
 
 
 #########
@@ -501,16 +511,19 @@ class ClientHelper():
 			length=length+float(song.get("duration", 0.0))
 		return ClientHelper.seconds_to_display_time(int(length))
 
-	def binary_to_pixbuf(binary, size):
+	def binary_to_pixbuf(binary, size=-1):
 		loader=GdkPixbuf.PixbufLoader.new()
 		loader.write(binary)
 		loader.close()
-		raw_pixbuf=loader.get_pixbuf()
-		ratio=raw_pixbuf.get_width()/raw_pixbuf.get_height()
-		if ratio > 1:
-			pixbuf=raw_pixbuf.scale_simple(size,size/ratio,GdkPixbuf.InterpType.BILINEAR)
+		if size > 0:
+			raw_pixbuf=loader.get_pixbuf()
+			ratio=raw_pixbuf.get_width()/raw_pixbuf.get_height()
+			if ratio > 1:
+				pixbuf=raw_pixbuf.scale_simple(size,size/ratio,GdkPixbuf.InterpType.BILINEAR)
+			else:
+				pixbuf=raw_pixbuf.scale_simple(size*ratio,size,GdkPixbuf.InterpType.BILINEAR)
 		else:
-			pixbuf=raw_pixbuf.scale_simple(size*ratio,size,GdkPixbuf.InterpType.BILINEAR)
+			pixbuf=loader.get_pixbuf()
 		return pixbuf
 
 class EventEmitter(GObject.Object):
@@ -544,8 +557,7 @@ class Client(MPDClient):
 		self._last_status={}
 		self._refresh_interval=self._settings.get_int("refresh-interval")
 		self._main_timeout_id=None
-		self.fallback_cover=Gtk.IconTheme.get_default().lookup_icon("media-optical", 128, Gtk.IconLookupFlags.FORCE_SVG).get_filename()
-
+		self.fallback_cover="/usr/share/icons/Adwaita/scalable/devices/media-optical-symbolic.svg"  #TODO
 		# connect
 		self._settings.connect("changed::active-profile", self._on_active_profile_changed)
 
@@ -725,19 +737,19 @@ class Client(MPDClient):
 					binary=None
 		return binary
 
-	def get_cover(self, song, size):
+	def get_cover(self, song):
 		cover_path=self.get_cover_path(song)
 		if cover_path is None:
 			cover_binary=self.get_cover_binary(song.get("file"))
 			if cover_binary is None:
-				pixbuf=GdkPixbuf.Pixbuf.new_from_file_at_size(self.fallback_cover, size, size)
+				pixbuf=GdkPixbuf.Pixbuf.new_from_file(self.fallback_cover)
 			else:
-				pixbuf=ClientHelper.binary_to_pixbuf(cover_binary, size)
+				pixbuf=ClientHelper.binary_to_pixbuf(cover_binary)
 		else:
 			try:
-				pixbuf=GdkPixbuf.Pixbuf.new_from_file_at_size(cover_path, size, size)
+				pixbuf=GdkPixbuf.Pixbuf.new_from_file(cover_path)
 			except:  # load fallback if cover can't be loaded (GLib: Couldn’t recognize the image file format for file...)
-				pixbuf=GdkPixbuf.Pixbuf.new_from_file_at_size(self.fallback_cover, size, size)
+				pixbuf=GdkPixbuf.Pixbuf.new_from_file(self.fallback_cover)
 		return pixbuf
 
 	def get_metadata(self, uri):
@@ -862,7 +874,6 @@ class Settings(Gio.Settings):
 	BASE_KEY="org.mpdevil.mpdevil"
 	# temp settings
 	mini_player=GObject.Property(type=bool, default=False)
-	cursor_watch=GObject.Property(type=bool, default=False)
 	def __init__(self):
 		super().__init__(schema=self.BASE_KEY)
 
@@ -900,14 +911,6 @@ class Settings(Gio.Settings):
 		array[pos]=value
 		self.set_value(key, GLib.Variant(vtype, array))
 
-	def get_gtk_icon_size(self, key):
-		icon_size=self.get_int(key)
-		sizes=[(48, Gtk.IconSize.DIALOG), (32, Gtk.IconSize.DND), (24, Gtk.IconSize.LARGE_TOOLBAR), (16, Gtk.IconSize.BUTTON)]
-		for pixel_size, gtk_size in sizes:
-			if icon_size >= pixel_size:
-				return gtk_size
-		return Gtk.IconSize.INVALID
-
 	def get_artist_type(self):
 		if self.get_boolean("use-album-artist"):
 			return ("albumartist")
@@ -928,13 +931,12 @@ class Settings(Gio.Settings):
 
 class GeneralSettings(Gtk.Box):
 	def __init__(self, settings):
-		super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6, border_width=18)
+		super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin_top=18, margin_bottom=18, margin_start=18, margin_end=18)
 		self._settings=settings
 
 		# int settings
 		int_settings={}
 		int_settings_data=[
-			(_("Main cover size:"), (100, 1200, 10), "track-cover"),
 			(_("Album view cover size:"), (50, 600, 10), "album-cover"),
 			(_("Action bar icon size:"), (16, 64, 2), "icon-size"),
 			(_("Secondary icon size:"), (16, 64, 2), "icon-size-sec")
@@ -969,56 +971,54 @@ class GeneralSettings(Gtk.Box):
 
 		# view grid
 		view_grid=Gtk.Grid(row_spacing=6, column_spacing=12, margin_start=12)
-		view_grid.add(int_settings["track-cover"][0])
-		view_grid.attach_next_to(int_settings["album-cover"][0], int_settings["track-cover"][0], Gtk.PositionType.BOTTOM, 1, 1)
+		view_grid.attach(int_settings["album-cover"][0], 0, 0, 1, 1)
 		view_grid.attach_next_to(int_settings["icon-size"][0], int_settings["album-cover"][0], Gtk.PositionType.BOTTOM, 1, 1)
 		view_grid.attach_next_to(int_settings["icon-size-sec"][0], int_settings["icon-size"][0], Gtk.PositionType.BOTTOM, 1, 1)
-		view_grid.attach_next_to(int_settings["track-cover"][1], int_settings["track-cover"][0], Gtk.PositionType.RIGHT, 1, 1)
 		view_grid.attach_next_to(int_settings["album-cover"][1], int_settings["album-cover"][0], Gtk.PositionType.RIGHT, 1, 1)
 		view_grid.attach_next_to(int_settings["icon-size"][1], int_settings["icon-size"][0], Gtk.PositionType.RIGHT, 1, 1)
 		view_grid.attach_next_to(int_settings["icon-size-sec"][1], int_settings["icon-size-sec"][0], Gtk.PositionType.RIGHT, 1, 1)
 
 		# packing
 		csd_box=Gtk.Box(spacing=12)
-		csd_box.pack_start(check_buttons["use-csd"], False, False, 0)
-		csd_box.pack_start(Gtk.Label(label=_("(restart required)"), sensitive=False), False, False, 0)
-		self.pack_start(view_heading, False, False, 0)
-		self.pack_start(csd_box, False, False, 0)
-		self.pack_start(check_buttons["show-stop"], False, False, 0)
-		self.pack_start(check_buttons["show-lyrics-button"], False, False, 0)
-		self.pack_start(check_buttons["playlist-right"], False, False, 0)
-		self.pack_start(view_grid, False, False, 0)
-		self.pack_start(behavior_heading, False, False, 0)
+		csd_box.append(check_buttons["use-csd"])
+		csd_box.append(Gtk.Label(label=_("(restart required)"), sensitive=False))
+		self.append(view_heading)
+		self.append(csd_box)
+		self.append(check_buttons["show-stop"])
+		self.append(check_buttons["show-lyrics-button"])
+		self.append(check_buttons["playlist-right"])
+		self.append(view_grid)
+		self.append(behavior_heading)
 		mpris_box=Gtk.Box(spacing=12)
-		mpris_box.pack_start(check_buttons["mpris"], False, False, 0)
-		mpris_box.pack_start(Gtk.Label(label=_("(restart required)"), sensitive=False), False, False, 0)
-		self.pack_start(mpris_box, False, False, 0)
-		self.pack_start(check_buttons["use-album-artist"], False, False, 0)
-		self.pack_start(check_buttons["sort-albums-by-year"], False, False, 0)
-		self.pack_start(check_buttons["send-notify"], False, False, 0)
-		self.pack_start(check_buttons["force-mode"], False, False, 0)
-		self.pack_start(check_buttons["stop-on-quit"], False, False, 0)
+		mpris_box.append(check_buttons["mpris"])
+		mpris_box.append(Gtk.Label(label=_("(restart required)"), sensitive=False))
+		self.append(mpris_box)
+		self.append(check_buttons["use-album-artist"])
+		self.append(check_buttons["sort-albums-by-year"])
+		self.append(check_buttons["send-notify"])
+		self.append(check_buttons["force-mode"])
+		self.append(check_buttons["stop-on-quit"])
 
 class ProfileSettings(Gtk.Grid):
 	def __init__(self, parent, client, settings):
-		super().__init__(row_spacing=6, column_spacing=12, border_width=18)
+		super().__init__(row_spacing=6, column_spacing=12, margin_top=18, margin_bottom=18, margin_start=18, margin_end=18)
 		self._client=client
 		self._settings=settings
 
 		# widgets
 		self._profiles_combo=ComboBoxEntry()
-		add_button=Gtk.Button(image=Gtk.Image.new_from_icon_name("list-add-symbolic", Gtk.IconSize.BUTTON))
-		delete_button=Gtk.Button(image=Gtk.Image.new_from_icon_name("list-remove-symbolic", Gtk.IconSize.BUTTON))
-		add_delete_buttons=Gtk.ButtonBox(layout_style=Gtk.ButtonBoxStyle.EXPAND)
-		add_delete_buttons.pack_start(add_button, True, True, 0)
-		add_delete_buttons.pack_start(delete_button, True, True, 0)
+		add_button=Gtk.Button(child=Gtk.Image.new_from_icon_name("list-add-symbolic"))
+		delete_button=Gtk.Button(child=Gtk.Image.new_from_icon_name("list-remove-symbolic"))
+		add_delete_buttons=Gtk.Box(css_classes=["linked"])
+		add_delete_buttons.append(add_button)
+		add_delete_buttons.append(delete_button)
 		connect_button=Gtk.Button.new_with_mnemonic(_("_Connect"))
 		self._host_entry=Gtk.Entry(hexpand=True)
 		self._port_entry=Gtk.SpinButton.new_with_range(0, 65535, 1)
 		address_entry=Gtk.Box(spacing=6)
-		address_entry.pack_start(self._host_entry, True, True, 0)
-		address_entry.pack_start(self._port_entry, False, False, 0)
-		self._password_entry=PasswordEntry(hexpand=True)
+		address_entry.append(self._host_entry)
+		address_entry.append(self._port_entry)
+		self._password_entry=Gtk.PasswordEntry(show_peek_icon=True, hexpand=True)
 		self._path_entry=Gtk.Entry(hexpand=True, placeholder_text=GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_MUSIC))
 		self._path_entry.set_icon_from_icon_name(Gtk.EntryIconPosition.SECONDARY, "folder-open-symbolic")
 		self._regex_entry=Gtk.Entry(hexpand=True, placeholder_text=COVER_REGEX)
@@ -1050,7 +1050,7 @@ class ProfileSettings(Gtk.Grid):
 		self.entry_changed_handlers.append((self._regex_entry, self._regex_entry.connect("changed", self._on_regex_entry_changed)))
 
 		# packing
-		self.add(profiles_label)
+		self.attach(profiles_label, 0, 0, 1, 1)
 		self.attach_next_to(host_label, profiles_label, Gtk.PositionType.BOTTOM, 1, 1)
 		self.attach_next_to(password_label, host_label, Gtk.PositionType.BOTTOM, 1, 1)
 		self.attach_next_to(path_label, password_label, Gtk.PositionType.BOTTOM, 1, 1)
@@ -1139,11 +1139,10 @@ class ProfileSettings(Gtk.Grid):
 		folder=self._settings.get_lib_path(self._profiles_combo.get_selected())
 		if folder is not None:
 			dialog.set_current_folder(folder)
-		response=dialog.run()
+		response=dialog.response()
 		if response == Gtk.ResponseType.ACCEPT:
 			self._settings.array_modify("as", "paths", self._profiles_combo.get_selected(), dialog.get_filename())
 			self._path_entry.set_text(dialog.get_filename())
-		dialog.destroy()
 
 	def _on_profiles_select(self, *args):
 		active=self._profiles_combo.get_active()
@@ -1156,9 +1155,9 @@ class ProfileSettings(Gtk.Grid):
 			self._regex_entry.set_text(self._settings.get_value("regex")[active])
 			self._unblock_entry_changed_handlers()
 
-class PlaylistSettings(Gtk.Box):
+class PlaylistSettings(Gtk.Box):  # TODO
 	def __init__(self, settings):
-		super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6, border_width=18)
+		super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin_top=18, margin_bottom=18, margin_start=18, margin_end=18)
 		self._settings=settings
 
 		# label
@@ -1166,8 +1165,8 @@ class PlaylistSettings(Gtk.Box):
 
 		# treeview
 		# (toggle, header, actual_index)
-		self._store=Gtk.ListStore(bool, str, int)
-		treeview=Gtk.TreeView(model=self._store, reorderable=True, headers_visible=False, search_column=-1)
+		self._store=WorkAroundListStore(bool, str, int)
+		treeview=Gtk.TreeView(model=self._store, reorderable=True, headers_visible=False, search_column=-1, vexpand=True)
 		self._selection=treeview.get_selection()
 
 		# columns
@@ -1183,38 +1182,21 @@ class PlaylistSettings(Gtk.Box):
 		self._fill()
 
 		# scroll
-		scroll=Gtk.ScrolledWindow()
+		scroll=Gtk.ScrolledWindow(hexpand=True)
 		scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-		scroll.add(treeview)
-
-		# toolbar
-		toolbar=Gtk.Toolbar(icon_size=Gtk.IconSize.SMALL_TOOLBAR)
-		style_context=toolbar.get_style_context()
-		style_context.add_class("inline-toolbar")
-		self._up_button=Gtk.ToolButton(icon_name="go-up-symbolic")
-		self._up_button.set_sensitive(False)
-		self._down_button=Gtk.ToolButton(icon_name="go-down-symbolic")
-		self._down_button.set_sensitive(False)
-		toolbar.insert(self._up_button, 0)
-		toolbar.insert(self._down_button, 1)
+		scroll.set_child(treeview)
 
 		# column chooser
 		frame=Gtk.Frame()
-		frame.add(scroll)
-		column_chooser=Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-		column_chooser.pack_start(frame, True, True, 0)
-		column_chooser.pack_start(toolbar, False, False, 0)
+		frame.set_child(scroll)
 
 		# connect
 		self._row_deleted=self._store.connect("row-deleted", self._save_permutation)
 		renderer_toggle.connect("toggled", self._on_cell_toggled)
-		self._up_button.connect("clicked", self._on_up_button_clicked)
-		self._down_button.connect("clicked", self._on_down_button_clicked)
-		self._selection.connect("changed", self._set_button_sensitivity)
 
 		# packing
-		self.pack_start(label, False, False, 0)
-		self.pack_start(column_chooser, True, True, 0)
+		self.append(label)
+		self.append(frame)
 
 	def _fill(self, *args):
 		visibilities=self._settings.get_value("column-visibilities").unpack()
@@ -1227,52 +1209,14 @@ class PlaylistSettings(Gtk.Box):
 			permutation.append(row[2])
 		self._settings.set_value("column-permutation", GLib.Variant("ai", permutation))
 
-	def _set_button_sensitivity(self, *args):
-		treeiter=self._selection.get_selected()[1]
-		if treeiter is None:
-			self._up_button.set_sensitive(False)
-			self._down_button.set_sensitive(False)
-		else:
-			path=self._store.get_path(treeiter)
-			if self._store.iter_next(treeiter) is None:
-				self._up_button.set_sensitive(True)
-				self._down_button.set_sensitive(False)
-			elif not path.prev():
-				self._up_button.set_sensitive(False)
-				self._down_button.set_sensitive(True)
-			else:
-				self._up_button.set_sensitive(True)
-				self._down_button.set_sensitive(True)
-
 	def _on_cell_toggled(self, widget, path):
 		self._store[path][0]=not self._store[path][0]
 		self._settings.array_modify("ab", "column-visibilities", self._store[path][2], self._store[path][0])
 
-	def _on_up_button_clicked(self, *args):
-		treeiter=self._selection.get_selected()[1]
-		path=self._store.get_path(treeiter)
-		path.prev()
-		prev=self._store.get_iter(path)
-		self._store.move_before(treeiter, prev)
-		self._set_button_sensitivity()
-		self._save_permutation()
-
-	def _on_down_button_clicked(self, *args):
-		treeiter=self._selection.get_selected()[1]
-		path=self._store.get_path(treeiter)
-		next=self._store.iter_next(treeiter)
-		self._store.move_after(treeiter, next)
-		self._set_button_sensitivity()
-		self._save_permutation()
-
 class SettingsDialog(Gtk.Dialog):
 	def __init__(self, parent, client, settings, tab="general"):
 		use_csd=settings.get_boolean("use-csd")
-		if use_csd:
-			super().__init__(title=_("Settings"), transient_for=parent, use_header_bar=True)
-		else:
-			super().__init__(title=_("Settings"), transient_for=parent)
-			self.add_button(Gtk.STOCK_OK, Gtk.ResponseType.OK)
+		super().__init__(title=_("Settings"), transient_for=parent, use_header_bar=use_csd)
 		self.set_default_size(500, 400)
 
 		# widgets
@@ -1288,18 +1232,18 @@ class SettingsDialog(Gtk.Dialog):
 			stack.add_titled(profiles, "profiles", _("Profiles"))
 			stack.add_titled(playlist, "playlist", _("Playlist"))
 			stack_switcher=Gtk.StackSwitcher(stack=stack)
-			vbox.pack_start(stack, True, True, 0)
+			vbox.append(stack)
 			header_bar=self.get_header_bar()
-			header_bar.set_custom_title(stack_switcher)
+			header_bar.set_title_widget(stack_switcher)
 		else:
-			tabs=Gtk.Notebook()
+			tabs=Gtk.Notebook(show_border=False)
 			tabs.append_page(general, Gtk.Label(label=_("General")))
 			tabs.append_page(profiles, Gtk.Label(label=_("Profiles")))
 			tabs.append_page(playlist, Gtk.Label(label=_("Playlist")))
 			vbox.set_property("spacing", 6)
-			vbox.set_property("border-width", 6)
-			vbox.pack_start(tabs, True, True, 0)
-		self.show_all()
+#			vbox.set_property("border-width", 6) TODO
+			vbox.append(tabs)
+		self.show()
 		if use_csd:
 			stack.set_visible_child_name(tab)
 		else:
@@ -1313,12 +1257,10 @@ class ServerStats(Gtk.Dialog):
 	def __init__(self, parent, client, settings):
 		use_csd=settings.get_boolean("use-csd")
 		super().__init__(title=_("Stats"), transient_for=parent, use_header_bar=use_csd)
-		if not use_csd:
-			self.add_button(Gtk.STOCK_OK, Gtk.ResponseType.OK)
 		self.set_resizable(False)
 
 		# grid
-		grid=Gtk.Grid(row_spacing=6, column_spacing=12, border_width=6)
+		grid=Gtk.Grid(row_spacing=6, column_spacing=12, margin_top=6, margin_bottom=6, margin_start=6, margin_end=6)
 
 		# populate
 		display_str={
@@ -1343,10 +1285,9 @@ class ServerStats(Gtk.Dialog):
 
 		# packing
 		vbox=self.get_content_area()
-		vbox.set_property("border-width", 6)
-		vbox.pack_start(grid, True, True, 0)
-		self.show_all()
-		self.run()
+#		vbox.set_property("border-width", 6) TODO
+		vbox.append(grid)
+		self.show() # TODO
 
 class AboutDialog(Gtk.AboutDialog):
 	def __init__(self, window):
@@ -1360,42 +1301,11 @@ class AboutDialog(Gtk.AboutDialog):
 		self.set_copyright("Copyright \xa9 2020-2021 Martin Wagner")
 		self.set_license_type(Gtk.License.GPL_3_0)
 		self.set_logo_icon_name("org.mpdevil.mpdevil")
+		self.show()
 
 ###########################
 # general purpose widgets #
 ###########################
-
-class AutoSizedIcon(Gtk.Image):
-	def __init__(self, icon_name, settings_key, settings):
-		super().__init__()
-		self.set_from_icon_name(icon_name, Gtk.IconSize.BUTTON)
-		pixel_size=settings.get_int(settings_key)
-		if pixel_size > 0:
-			self.set_pixel_size(pixel_size)
-		self._settings=settings
-		self._settings_key=settings_key
-
-		# connect
-		self._settings.connect("changed::"+self._settings_key, self._on_icon_size_changed)
-
-	def _on_icon_size_changed(self, *args):
-		self.set_pixel_size(self._settings.get_int(self._settings_key))
-
-class PasswordEntry(Gtk.Entry):
-	def __init__(self, **kwargs):
-		super().__init__(visibility=False, caps_lock_warning=False, input_purpose=Gtk.InputPurpose.PASSWORD, **kwargs)
-		self.set_icon_from_icon_name(Gtk.EntryIconPosition.SECONDARY, "view-conceal-symbolic")
-
-		# connect
-		self.connect("icon-release", self._on_icon_release)
-
-	def _on_icon_release(self, *args):
-		if self.get_icon_name(Gtk.EntryIconPosition.SECONDARY) == "view-conceal-symbolic":
-			self.set_visibility(True)
-			self.set_icon_from_icon_name(Gtk.EntryIconPosition.SECONDARY, "view-reveal-symbolic")
-		else:
-			self.set_visibility(False)
-			self.set_icon_from_icon_name(Gtk.EntryIconPosition.SECONDARY, "view-conceal-symbolic")
 
 class ComboBoxEntry(Gtk.ComboBoxText):
 	__gsignals__={"text": (GObject.SignalFlags.RUN_FIRST, None, ()), "select": (GObject.SignalFlags.RUN_FIRST, None, ())}
@@ -1429,17 +1339,17 @@ class ComboBoxEntry(Gtk.ComboBoxText):
 class FocusFrame(Gtk.Overlay):
 	def __init__(self):
 		super().__init__()
-		self._frame=Gtk.Frame(no_show_all=True)
+		self._frame=Gtk.Frame(visible=False)
 
 		# css
 		style_context=self._frame.get_style_context()
 		provider=Gtk.CssProvider()
-		css=b"""* {border-color: @theme_selected_bg_color; border-width: 0px; border-top-width: 3px;}"""
+		css=b"""* {border-color: @theme_selected_bg_color; border-width: 0px; border-top-width: 3px; border-radius: 0px;}"""
 		provider.load_from_data(css)
 		style_context.add_provider(provider, 600)
 
 		self.add_overlay(self._frame)
-		self.set_overlay_pass_through(self._frame, True)
+		self._frame.set_property("can-target", False)
 
 	def disable(self):
 		self._frame.hide()
@@ -1450,19 +1360,22 @@ class FocusFrame(Gtk.Overlay):
 
 	def set_widget(self, widget):
 		self._widget=widget
-		self._widget.connect("focus-in-event", lambda *args: self._frame.show())
-		self._widget.connect("focus-out-event", lambda *args: self._frame.hide())
+		controller_focus=Gtk.EventControllerFocus()
+		widget.add_controller(controller_focus)
+		controller_focus.connect("enter", lambda *args: self._frame.show())
+		controller_focus.connect("leave", lambda *args: self._frame.hide())
 
 class SongPopover(Gtk.Popover):
-	def __init__(self, client, show_buttons=True):
-		super().__init__()
+	def __init__(self, client, parent, show_buttons=True):
+		super().__init__(vexpand=True)
 		self._client=client
 		self._rect=Gdk.Rectangle()
 		self._uri=None
-		box=Gtk.Box(orientation=Gtk.Orientation.VERTICAL, border_width=6, spacing=6)
+		self.set_parent(parent)
+		box=Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, vexpand=True)
 
 		# open-with button
-		open_button=Gtk.Button(image=Gtk.Image.new_from_icon_name("document-open-symbolic",Gtk.IconSize.BUTTON),tooltip_text=_("Open with…"))
+		open_button=Gtk.Button(child=Gtk.Image.new_from_icon_name("document-open-symbolic"), tooltip_text=_("Open with…"))
 		open_button.set_margin_bottom(6)
 		open_button.set_margin_end(6)
 		style_context=open_button.get_style_context()
@@ -1472,25 +1385,22 @@ class SongPopover(Gtk.Popover):
 		self._open_button_revealer=Gtk.Revealer()
 		self._open_button_revealer.set_halign(Gtk.Align.END)
 		self._open_button_revealer.set_valign(Gtk.Align.END)
-		self._open_button_revealer.add(open_button)
+		self._open_button_revealer.set_child(open_button)
 
 		# buttons
 		if show_buttons:
-			button_box=Gtk.ButtonBox(layout_style=Gtk.ButtonBoxStyle.EXPAND)
-			data=((_("Append"), "list-add-symbolic", "append"),
-				(_("Play"), "media-playback-start-symbolic", "play"),
-				(_("Enqueue"), "insert-object-symbolic", "enqueue")
-			)
-			for label, icon, mode in data:
-				button=Gtk.Button(label=label, image=Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.BUTTON))
+			button_box=Gtk.Box(css_classes=["linked"])
+			data=((_("Append"), "append"), (_("Play"), "play"), (_("Enqueue"), "enqueue"))
+			for label, mode in data:
+				button=Gtk.Button(label=label)
 				button.connect("clicked", self._on_button_clicked, mode)
-				button_box.pack_start(button, True, True, 0)
-			box.pack_end(button_box, False, False, 0)
+				button_box.append(button)
+			box.append(button_box)
 
 		# treeview
 		# (tag, display-value, tooltip)
-		self._store=Gtk.ListStore(str, str, str)
-		self._treeview=Gtk.TreeView(model=self._store, headers_visible=False, search_column=-1, tooltip_column=2)
+		self._store=WorkAroundListStore(str, str, str)
+		self._treeview=Gtk.TreeView(model=self._store, headers_visible=False, search_column=-1, tooltip_column=2, vexpand=True)
 		self._treeview.set_can_focus(False)
 		self._treeview.get_selection().set_mode(Gtk.SelectionMode.NONE)
 
@@ -1505,36 +1415,33 @@ class SongPopover(Gtk.Popover):
 		self._treeview.append_column(column_value)
 
 		# scroll
-		self._scroll=Gtk.ScrolledWindow()
+		self._scroll=Gtk.ScrolledWindow(vexpand=True)
 		self._scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
 		self._scroll.set_propagate_natural_height(True)
-		self._scroll.add(self._treeview)
+		self._scroll.set_propagate_natural_width(True)
+		self._scroll.set_child(self._treeview)
 
 		# overlay
 		overlay=Gtk.Overlay()
-		overlay.add(self._scroll)
+		overlay.set_child(self._scroll)
 		overlay.add_overlay(self._open_button_revealer)
 
 		# connect
 		open_button.connect("clicked", self._on_open_button_clicked)
 
 		# packing
-		frame=Gtk.Frame()
-		frame.add(overlay)
-		box.pack_start(frame, True, True, 0)
-		self.add(box)
-		box.show_all()
+		box.prepend(overlay)
+		self.set_child(box)
 
-	def open(self, uri, widget, x, y, offset=26):
+	def open(self, uri, x, y):
 		self._uri=uri
 		self._rect.x=x
-		# Gtk places popovers in treeviews 26px above the given position for no obvious reasons, so I move them 26px
-		# This seems to be related to the width/height of the headers in treeviews
-		self._rect.y=y+offset
+		self._rect.y=y
 		self.set_pointing_to(self._rect)
-		self.set_relative_to(widget)
-		window=self.get_toplevel()
-		self._scroll.set_max_content_height(window.get_size()[1]//2)
+#		window=self.get_root()
+#		self._scroll.set_max_content_height(window.get_size()[1]//2)
+		self._scroll.set_max_content_height(800)  # TODO
+		self._scroll.set_min_content_height(500)  # TODO
 		self._store.clear()
 		song=ClientHelper.song_to_str_dict(self._client.get_metadata(uri))
 		for tag, value in song.items():
@@ -1553,17 +1460,19 @@ class SongPopover(Gtk.Popover):
 			self._gfile=Gio.File.new_for_path(abs_path)
 			self._open_button_revealer.set_reveal_child(True)
 		self.popup()
-		self._treeview.columns_autosize()
 
-	def _on_open_button_clicked(self, *args):
+	def _on_open_button_clicked(self, *args):  # TODO
 		self.popdown()
-		dialog=Gtk.AppChooserDialog(gfile=self._gfile, transient_for=self.get_toplevel())
+		dialog=Gtk.AppChooserDialog(gfile=self._gfile, transient_for=self.get_root())
 		app_chooser=dialog.get_widget()
-		response=dialog.run()
-		if response == Gtk.ResponseType.OK:
-			app=app_chooser.get_app_info()
-			app.launch([self._gfile], None)
-		dialog.destroy()
+		def callback(dialog, response):
+			if response == Gtk.ResponseType.OK:
+				print("a")
+				app=app_chooser.get_app_info()
+				app.launch([self._gfile], None)
+			dialog.destroy()
+		dialog.connect("response", callback)
+		dialog.show()
 
 	def _on_button_clicked(self, widget, mode):
 		self._client.files_to_playlist([self._uri], mode)
@@ -1571,7 +1480,7 @@ class SongPopover(Gtk.Popover):
 
 class SongsView(Gtk.TreeView):
 	def __init__(self, client, store, file_column_id):
-		super().__init__(model=store, search_column=-1, activate_on_single_click=True)
+		super().__init__(model=store, search_column=-1, activate_on_single_click=True, vexpand=True)
 		self._client=client
 		self._store=store
 		self._file_column_id=file_column_id
@@ -1580,11 +1489,16 @@ class SongsView(Gtk.TreeView):
 		self._selection=self.get_selection()
 
 		# song popover
-		self._song_popover=SongPopover(self._client)
+		self._song_popover=SongPopover(self._client, self)
+
+		# event controllers
+		for i in (1,2,3):
+			controller=Gtk.GestureClick(button=i)
+			self.add_controller(controller)
+			controller.connect("pressed", self._on_gesture_click_pressed)
 
 		# connect
 		self.connect("row-activated", self._on_row_activated)
-		self.connect("button-press-event", self._on_button_press_event)
 		self._client.emitter.connect("show-info", self._on_show_info)
 		self._client.emitter.connect("add-to-playlist", self._on_add_to_playlist)
 
@@ -1603,20 +1517,17 @@ class SongsView(Gtk.TreeView):
 	def _on_row_activated(self, widget, path, view_column):
 		self._client.files_to_playlist([self._store[path][self._file_column_id]])
 
-	def _on_button_press_event(self, widget, event):
-		path_re=widget.get_path_at_pos(int(event.x), int(event.y))
+	def _on_gesture_click_pressed(self, controller, n_press, raw_x, raw_y):
+		x,y=self.convert_widget_to_bin_window_coords(raw_x,raw_y)
+		path_re=self.get_path_at_pos(x, y)
 		if path_re is not None:
 			path=path_re[0]
-			if event.button == 1 and event.type == Gdk.EventType._2BUTTON_PRESS:
+			if controller.get_property("button") == 1 and n_press == 2:
 				self._client.files_to_playlist([self._store[path][self._file_column_id]], "play")
-			elif event.button == 2 and event.type == Gdk.EventType.BUTTON_PRESS:
+			elif controller.get_property("button") == 2 and n_press == 1:
 				self._client.files_to_playlist([self._store[path][self._file_column_id]], "append")
-			elif event.button == 3 and event.type == Gdk.EventType.BUTTON_PRESS:
-				uri=self._store[path][self._file_column_id]
-				if self.get_property("headers-visible"):
-					self._song_popover.open(uri, widget, int(event.x), int(event.y))
-				else:
-					self._song_popover.open(uri, widget, int(event.x), int(event.y), offset=0)
+			elif controller.get_property("button") == 3 and n_press == 1:
+				self._song_popover.open(self._store[path][self._file_column_id], raw_x, raw_y)
 
 	def _on_show_info(self, *args):
 		if self.has_focus():
@@ -1624,7 +1535,7 @@ class SongsView(Gtk.TreeView):
 			if treeiter is not None:
 				path=self._store.get_path(treeiter)
 				cell=self.get_cell_area(path, None)
-				self._song_popover.open(self._store[path][self._file_column_id], self, cell.x, cell.y)
+				self._song_popover.open(self._store[path][self._file_column_id], cell.x, cell.y)
 
 	def _on_add_to_playlist(self, emitter, mode):
 		if self.has_focus():
@@ -1636,7 +1547,7 @@ class SongsWindow(Gtk.Box):
 	__gsignals__={"button-clicked": (GObject.SignalFlags.RUN_FIRST, None, ())}
 	def __init__(self, client, store, file_column_id, popover_mode=False):
 		if popover_mode:
-			super().__init__(orientation=Gtk.Orientation.VERTICAL, border_width=6, spacing=6)
+			super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6)
 		else:
 			super().__init__(orientation=Gtk.Orientation.VERTICAL)
 		self._client=client
@@ -1647,36 +1558,35 @@ class SongsWindow(Gtk.Box):
 		# scroll
 		self._scroll=Gtk.ScrolledWindow()
 		self._scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-		self._scroll.add(self._songs_view)
+		self._scroll.set_child(self._songs_view)
 
 		# buttons
-		button_box=Gtk.ButtonBox(layout_style=Gtk.ButtonBoxStyle.EXPAND)
-		data=((_("_Append"), _("Add all titles to playlist"), "list-add-symbolic", "append"),
-			(_("_Play"), _("Directly play all titles"), "media-playback-start-symbolic", "play"),
+		button_box=Gtk.Box(css_classes=["linked"])
+		data=((_("_Append"), _("Add all titles to playlist"), "append"),
+			(_("_Play"), _("Directly play all titles"), "play"),
 			(_("_Enqueue"), _("Append all titles after the currently playing track and clear the playlist from all other songs"),
-			"insert-object-symbolic", "enqueue")
+			"enqueue")
 		)
-		for label, tooltip, icon, mode in data:
+		for label, tooltip, mode in data:
 			button=Gtk.Button.new_with_mnemonic(label)
-			button.set_image(Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.BUTTON))
 			button.set_tooltip_text(tooltip)
 			button.connect("clicked", self._on_button_clicked, mode)
-			button_box.pack_start(button, True, True, 0)
+			button_box.append(button)
 
 		# action bar
 		self._action_bar=Gtk.ActionBar()
 
 		# packing
 		if popover_mode:
-			self.pack_end(button_box, False, False, 0)
+			self.append(button_box)
 			frame=Gtk.Frame()
 		else:
 			self._action_bar.pack_start(button_box)
-			self.pack_end(self._action_bar, False, False, 0)
+			self.append(self._action_bar)
 			frame=FocusFrame()
 			frame.set_widget(self._songs_view)
-		frame.add(self._scroll)
-		self.pack_start(frame, True, True, 0)
+		frame.set_child(self._scroll)
+		self.prepend(frame)
 
 	def get_treeview(self):
 		return self._songs_view
@@ -1700,7 +1610,7 @@ class AlbumPopover(Gtk.Popover):
 
 		# songs window
 		# (track, title (artist), duration, file, search text)
-		self._store=Gtk.ListStore(str, str, str, str, str)
+		self._store=WorkAroundListStore(str, str, str, str, str)
 		songs_window=SongsWindow(self._client, self._store, 3, popover_mode=True)
 
 		# scroll
@@ -1730,14 +1640,15 @@ class AlbumPopover(Gtk.Popover):
 		songs_window.connect("button-clicked", lambda *args: self.popdown())
 
 		# packing
-		self.add(songs_window)
-		songs_window.show_all()
+		self.set_child(songs_window)
+		songs_window.show()
 
 	def open(self, album, album_artist, date, genre, widget, x, y):
 		self._rect.x=x
 		self._rect.y=y
 		self.set_pointing_to(self._rect)
-		self.set_relative_to(widget)
+		self.set_parent(widget)
+		self._scroll.set_min_content_height(4*widget.get_allocated_height()//7)  # TODO
 		self._scroll.set_max_content_height(4*widget.get_allocated_height()//7)
 		self._songs_view.set_model(None)  # clear old scroll position
 		self._store.clear()
@@ -1775,25 +1686,25 @@ class ArtistPopover(Gtk.Popover):
 		self._genre=None
 
 		# buttons
-		vbox=Gtk.ButtonBox(orientation=Gtk.Orientation.VERTICAL, border_width=9)
+		vbox=Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
 		data=((_("Append"), "list-add-symbolic", "append"),
 			(_("Play"), "media-playback-start-symbolic", "play"),
 			(_("Enqueue"), "insert-object-symbolic", "enqueue")
 		)
 		for label, icon, mode in data:
-			button=Gtk.ModelButton(label=label, image=Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.BUTTON))
+			button=Gtk.Button(label=label, has_frame=False)
 			button.get_child().set_property("xalign", 0)
 			button.connect("clicked", self._on_button_clicked, mode)
-			vbox.pack_start(button, True, True, 0)
+			vbox.append(button)
 
-		self.add(vbox)
-		vbox.show_all()
+		self.set_child(vbox)
+		vbox.show()
 
 	def open(self, artist, genre, widget, x, y):
 		self._rect.x=x
 		self._rect.y=y
 		self.set_pointing_to(self._rect)
-		self.set_relative_to(widget)
+		self.set_parent(widget)
 		self._artist=artist
 		self._genre=genre
 		self.popup()
@@ -1818,14 +1729,14 @@ class SearchWindow(Gtk.Box):
 		self._tag_combo_box=Gtk.ComboBoxText()
 
 		# search entry
-		self.search_entry=Gtk.SearchEntry()
+		self.search_entry=Gtk.SearchEntry(hexpand=True)
 
 		# label
 		self._hits_label=Gtk.Label(xalign=1)
 
 		# store
 		# (track, title, artist, album, duration, file, sort track)
-		self._store=Gtk.ListStore(str, str, str, str, str, str, int)
+		self._store=WorkAroundListStore(str, str, str, str, str, str, int)
 		self._store.set_default_sort_func(lambda *args: 0)
 
 		# songs window
@@ -1876,23 +1787,27 @@ class SearchWindow(Gtk.Box):
 		column_album.set_sort_column_id(3)
 		column_time.set_sort_column_id(4)
 
+		# event controller
+		controller_focus=Gtk.EventControllerFocus()
+		self.search_entry.add_controller(controller_focus)
+		controller_focus.connect("enter", self._on_search_entry_focus_event, True)
+		controller_focus.connect("leave", self._on_search_entry_focus_event, False)
+
 		# connect
 		self._search_entry_changed=self.search_entry.connect("search-changed", self._search)
-		self.search_entry.connect("focus_in_event", self._on_search_entry_focus_event, True)
-		self.search_entry.connect("focus_out_event", self._on_search_entry_focus_event, False)
 		self._tag_combo_box_changed=self._tag_combo_box.connect("changed", self._search)
 		self._client.emitter.connect("reconnected", self._on_reconnected)
 		self._client.emitter.connect("disconnected", self._on_disconnected)
 
 		# packing
-		hbox=Gtk.Box(spacing=6, border_width=6)
-		hbox.pack_start(self.search_entry, True, True, 0)
-		hbox.pack_end(self._tag_combo_box, False, False, 0)
+		hbox=Gtk.Box(spacing=6, margin_top=6, margin_bottom=6, margin_start=6, margin_end=6)
+		hbox.append(self.search_entry)
+		hbox.append(self._tag_combo_box)
 		self._hits_label.set_margin_end(6)
 		self._action_bar.pack_end(self._hits_label)
-		self.pack_start(hbox, False, False, 0)
-		self.pack_start(Gtk.Separator.new(orientation=Gtk.Orientation.HORIZONTAL), False, False, 0)
-		self.pack_start(self._songs_window, True, True, 0)
+		self.append(hbox)
+		self.append(Gtk.Separator.new(orientation=Gtk.Orientation.HORIZONTAL))
+		self.append(self._songs_window)
 
 	def _clear(self, *args):
 		if self._done:
@@ -1930,6 +1845,7 @@ class SearchWindow(Gtk.Box):
 	def _search(self, *args):
 		if self._done:
 			self._done=False
+			self.set_cursor_from_name("progress")
 			self._songs_view.clear()
 			self._hits_label.set_text("")
 			self._action_bar.set_sensitive(False)
@@ -1956,9 +1872,10 @@ class SearchWindow(Gtk.Box):
 							int_track
 					])
 					if i%100 == 0:
-						self.search_entry.set_progress_fraction((i+1)/hits)
-						while Gtk.events_pending():
-							Gtk.main_iteration_do(True)
+						#TODO
+						main=GLib.main_context_default()
+						while main.pending():
+							main.iteration()
 			if self._songs_view.count() > 0:
 				self._action_bar.set_sensitive(True)
 			self._done_callback()
@@ -1967,7 +1884,7 @@ class SearchWindow(Gtk.Box):
 			self._pending.append(self._search)
 
 	def _done_callback(self, *args):
-		self.search_entry.set_progress_fraction(0.0)
+		self.set_cursor_from_name("normal")
 		self._stop_flag=False
 		self._done=True
 		pending=self._pending
@@ -1979,8 +1896,8 @@ class SearchWindow(Gtk.Box):
 				pass
 		return False
 
-	def _on_search_entry_focus_event(self, widget, event, focus):
-		app=self.get_toplevel().get_application()
+	def _on_search_entry_focus_event(self, controller, focus):
+		app=self.get_root().get_application()
 		if focus:
 			app.set_accels_for_action("mpd.toggle-play", [])
 		else:
@@ -1989,7 +1906,7 @@ class SearchWindow(Gtk.Box):
 class GenreSelect(Gtk.ComboBoxText):
 	__gsignals__={"genre_changed": (GObject.SignalFlags.RUN_FIRST, None, ())}
 	def __init__(self, client):
-		super().__init__(wrap_width=3)
+		super().__init__(hexpand=True) #TODO wrap_width=3)
 		self._client=client
 
 		# connect
@@ -2042,8 +1959,8 @@ class ArtistWindow(FocusFrame):
 
 		# treeview
 		# (name, weight, initial-letter, weight-initials)
-		self._store=Gtk.ListStore(str, Pango.Weight, str, Pango.Weight)
-		self._treeview=Gtk.TreeView(model=self._store, activate_on_single_click=True, search_column=0, headers_visible=False)
+		self._store=WorkAroundListStore(str, Pango.Weight, str, Pango.Weight)
+		self._treeview=Gtk.TreeView(model=self._store, activate_on_single_click=True, search_column=0, headers_visible=False, vexpand=True)
 		self._treeview.columns_autosize()
 		self._selection=self._treeview.get_selection()
 
@@ -2062,13 +1979,18 @@ class ArtistWindow(FocusFrame):
 		# scroll
 		scroll=Gtk.ScrolledWindow()
 		scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-		scroll.add(self._treeview)
+		scroll.set_child(self._treeview)
 
 		# artist popover
 		self._artist_popover=ArtistPopover(self._client)
 
+		# event controllers
+		for i in (1,2,3):
+			controller=Gtk.GestureClick(button=i)
+			self._treeview.add_controller(controller)
+			controller.connect("pressed", self._on_gesture_click_pressed)
+
 		# connect
-		self._treeview.connect("button-press-event", self._on_button_press_event)
 		self._treeview.connect("row-activated", self._on_row_activated)
 		self._settings.connect("changed::use-album-artist", self._refresh)
 		self._client.emitter.connect("disconnected", self._on_disconnected)
@@ -2079,7 +2001,7 @@ class ArtistWindow(FocusFrame):
 		self.genre_select.connect("genre_changed", self._refresh)
 
 		self.set_widget(self._treeview)
-		self.add(scroll)
+		self.set_child(scroll)
 
 	def _clear(self, *args):
 		self._store.clear()
@@ -2144,10 +2066,10 @@ class ArtistWindow(FocusFrame):
 				self._treeview.set_cursor(path, None, False)
 				self._treeview.row_activated(path, self._column_name)
 
-	def _on_button_press_event(self, widget, event):
-		if ((event.button in (2,3) and event.type == Gdk.EventType.BUTTON_PRESS)
-			or (event.button == 1 and event.type == Gdk.EventType._2BUTTON_PRESS)):
-			path_re=widget.get_path_at_pos(int(event.x), int(event.y))
+	def _on_gesture_click_pressed(self, controller, n_press, raw_x, raw_y):
+		if ((controller.get_property("button") in (2,3) and n_press == 1) or (controller.get_property("button") == 1 and n_press == 2)):
+			x,y=self._treeview.convert_widget_to_bin_window_coords(raw_x,raw_y)
+			path_re=self._treeview.get_path_at_pos(x, y)
 			if path_re is not None:
 				path=path_re[0]
 				genre=self.genre_select.get_selected_genre()
@@ -2155,12 +2077,12 @@ class ArtistWindow(FocusFrame):
 					artist=None
 				else:
 					artist=self._store[path][0]
-				if event.button == 1:
+				if controller.get_property("button") == 1:
 					self._client.artist_to_playlist(artist, genre, "play")
-				elif event.button == 2:
+				elif controller.get_property("button") == 2:
 					self._client.artist_to_playlist(artist, genre, "append")
-				elif event.button == 3:
-					self._artist_popover.open(artist, genre, self._treeview, event.x, event.y)
+				elif controller.get_property("button") == 3:
+					self._artist_popover.open(artist, genre, self._treeview, raw_x, raw_y)
 
 	def _on_row_activated(self, widget, path, view_column):
 		if self._store[path][1] == Pango.Weight.BOOK:
@@ -2213,31 +2135,37 @@ class AlbumWindow(FocusFrame):
 		self._pending=[]
 
 		# cover, display_label, display_label_artist, tooltip(titles), album, year, artist
-		self._store=Gtk.ListStore(GdkPixbuf.Pixbuf, str, str, str, str, str, str)
+		self._store=WorkAroundListStore(GdkPixbuf.Pixbuf, str, str, str, str, str, str)
 		self._sort_settings()
 
 		# iconview
 		self._iconview=Gtk.IconView(
-			model=self._store, item_width=0, pixbuf_column=0, markup_column=1, tooltip_column=3, activate_on_single_click=True
+			model=self._store, item_width=0, pixbuf_column=0, markup_column=1,
+			tooltip_column=3, activate_on_single_click=True, vexpand=True
 		)
 
 		# scroll
 		scroll=Gtk.ScrolledWindow()
 		scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-		scroll.add(self._iconview)
+		scroll.set_child(self._iconview)
 		self._scroll_vadj=scroll.get_vadjustment()
 		self._scroll_hadj=scroll.get_hadjustment()
 
 		# progress bar
-		self._progress_bar=Gtk.ProgressBar(no_show_all=True)
+		self._progress_bar=Gtk.ProgressBar(visible=False)
 
 		# popover
 		self._album_popover=AlbumPopover(self._client, self._settings)
 		self._artist_popover=ArtistPopover(self._client)
 
+		# event controllers
+		for i in (1,2,3):
+			controller=Gtk.GestureClick(button=i)
+			self._iconview.add_controller(controller)
+			controller.connect("pressed", self._on_gesture_click_pressed)
+
 		# connect
 		self._iconview.connect("item-activated", self._on_item_activated)
-		self._iconview.connect("button-press-event", self._on_button_press_event)
 		self._client.emitter.connect("disconnected", self._on_disconnected)
 		self._client.emitter.connect("reconnected", self._on_reconnected)
 		self._client.emitter.connect("show-info", self._on_show_info)
@@ -2250,9 +2178,9 @@ class AlbumWindow(FocusFrame):
 		# packing
 		self.set_widget(self._iconview)
 		box=Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-		box.pack_start(scroll, True, True, 0)
-		box.pack_start(self._progress_bar, False, False, 0)
-		self.add(box)
+		box.append(scroll)
+		box.append(self._progress_bar)
+		self.set_child(box)
 
 	def _workaround_clear(self):
 		self._store.clear()
@@ -2295,7 +2223,7 @@ class AlbumWindow(FocusFrame):
 	def _refresh(self, *args):
 		if self._done:
 			self._done=False
-			self._settings.set_property("cursor-watch", True)
+			self.set_cursor_from_name("progress")
 			self._progress_bar.show()
 			self._store.clear()
 			self._iconview.set_model(None)
@@ -2325,8 +2253,10 @@ class AlbumWindow(FocusFrame):
 						if i > 0:  # more than one artist to show (all artists)
 							self._progress_bar.pulse()
 						albums.extend(self._client.get_albums(artist, genre))
-						while Gtk.events_pending():
-							Gtk.main_iteration_do(True)
+						#TODO
+						main=GLib.main_context_default()
+						while main.pending():
+							main.iteration()
 				except MPDBase.ConnectionError:
 					self._done_callback()
 					return
@@ -2398,7 +2328,7 @@ class AlbumWindow(FocusFrame):
 		self._client.album_to_playlist(album, artist, year, genre, mode)
 
 	def _done_callback(self, *args):
-		self._settings.set_property("cursor-watch", False)
+		self.set_cursor_from_name("default")
 		self._progress_bar.hide()
 		self._progress_bar.set_fraction(0)
 		self._stop_flag=False
@@ -2412,27 +2342,26 @@ class AlbumWindow(FocusFrame):
 				pass
 		return False
 
-	def _on_button_press_event(self, widget, event):
-		path=widget.get_path_at_pos(int(event.x), int(event.y))
-		if event.button == 1 and event.type == Gdk.EventType._2BUTTON_PRESS:
+	def _on_gesture_click_pressed(self, controller, n_press, x, y):
+		v=self._scroll_vadj.get_value()
+		h=self._scroll_hadj.get_value()
+		path=self._iconview.get_path_at_pos(x+h, y+v)
+		if controller.get_property("button") == 1 and n_press == 2:
 			if path is not None:
 				self._path_to_playlist(path, "play")
-		elif event.button == 2 and event.type == Gdk.EventType.BUTTON_PRESS:
+		elif controller.get_property("button") == 2 and n_press == 1:
 			if path is not None:
 				self._path_to_playlist(path, "append")
-		elif event.button == 3 and event.type == Gdk.EventType.BUTTON_PRESS:
-			v=self._scroll_vadj.get_value()
-			h=self._scroll_hadj.get_value()
+		elif controller.get_property("button") == 3 and n_press == 1:
 			genre=self._artist_window.genre_select.get_selected_genre()
 			if path is not None:
 				album=self._store[path][4]
 				year=self._store[path][5]
 				artist=self._store[path][6]
-				# when using "button-press-event" in iconview popovers only show up in combination with idle_add (bug in GTK?)
-				GLib.idle_add(self._album_popover.open, album, artist, year, genre, widget, event.x-h, event.y-v)
+				self._album_popover.open(album, artist, year, genre, self._iconview, x, y)
 			else:
 				artist=self._artist_window.get_selected_artist()
-				GLib.idle_add(self._artist_popover.open, artist, genre, widget, event.x-h, event.y-v)
+				self._artist_popover.open(artist, genre, self._iconview, x, y)
 
 	def _on_item_activated(self, widget, path):
 		treeiter=self._store.get_iter(path)
@@ -2476,33 +2405,29 @@ class AlbumWindow(FocusFrame):
 
 class Browser(Gtk.Paned):
 	def __init__(self, client, settings):
-		super().__init__(orientation=Gtk.Orientation.HORIZONTAL)
+		super().__init__(orientation=Gtk.Orientation.HORIZONTAL, shrink_start_child=False, shrink_end_child=False, resize_start_child=False)
 		self._client=client
 		self._settings=settings
 		self._use_csd=self._settings.get_boolean("use-csd")
 
 		# widgets
-		icons={}
-		icons_data=("go-previous-symbolic", "system-search-symbolic")
-		if self._use_csd:
-			for data in icons_data:
-				icons[data]=Gtk.Image.new_from_icon_name(data, Gtk.IconSize.BUTTON)
-		else:
-			for data in icons_data:
-				icons[data]=AutoSizedIcon(data, "icon-size-sec", self._settings)
-
-		self.back_to_current_album_button=Gtk.Button(image=icons["go-previous-symbolic"], tooltip_text=_("Back to current album"))
-		self.back_to_current_album_button.set_can_focus(False)
-		self.search_button=Gtk.ToggleButton(image=icons["system-search-symbolic"], tooltip_text=_("Search"))
-		self.search_button.set_can_focus(False)
+		self.back_to_current_album_button=Gtk.Button(icon_name="go-previous-symbolic",tooltip_text=_("Back to current album"),can_focus=False)
+		self.search_button=Gtk.ToggleButton(icon_name="system-search-symbolic", tooltip_text=_("Search"), can_focus=False)
+		if not self._use_csd:
+			self._settings.bind("icon-size-sec", self.back_to_current_album_button.get_child(), "pixel-size", Gio.SettingsBindFlags.GET)
+			self._settings.bind("icon-size-sec", self.search_button.get_child(), "pixel-size", Gio.SettingsBindFlags.GET)
 		self._genre_select=GenreSelect(self._client)
 		self._artist_window=ArtistWindow(self._client, self._settings, self._genre_select)
 		self._search_window=SearchWindow(self._client)
 		self._album_window=AlbumWindow(self._client, self._settings, self._artist_window)
 
+		# event controllers TODO
+		gesture_click_button1=Gtk.GestureClick(button=1)
+		self.back_to_current_album_button.add_controller(gesture_click_button1)
+		gesture_click_button1.connect("pressed", self._on_gesture_click_pressed)
+
 		# connect
 		self.back_to_current_album_button.connect("clicked", self._on_back_to_current_album_button_clicked)
-		self.back_to_current_album_button.connect("button-press-event", self._on_back_to_current_album_button_press_event)
 		self.search_button.connect("toggled", self._on_search_toggled)
 		self._artist_window.connect("artists_changed", self._on_artists_changed)
 		self._settings.connect("notify::mini-player", self._on_mini_player)
@@ -2513,19 +2438,19 @@ class Browser(Gtk.Paned):
 		self._stack=Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE)
 		self._stack.add_named(self._album_window, "albums")
 		self._stack.add_named(self._search_window, "search")
-		hbox=Gtk.Box(spacing=6, border_width=6)
+		hbox=Gtk.Box(spacing=6, margin_top=6, margin_bottom=6, margin_start=6, margin_end=6)
 		if self._use_csd:
-			hbox.pack_start(self._genre_select, True, True, 0)
+			hbox.append(self._genre_select)
 		else:
-			hbox.pack_start(self.back_to_current_album_button, False, False, 0)
-			hbox.pack_start(self._genre_select, True, True, 0)
-			hbox.pack_start(self.search_button, False, False, 0)
+			hbox.append(self.back_to_current_album_button)
+			hbox.append(self._genre_select)
+			hbox.append(self.search_button)
 		box1=Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-		box1.pack_start(hbox, False, False, 0)
-		box1.pack_start(Gtk.Separator.new(orientation=Gtk.Orientation.HORIZONTAL), False, False, 0)
-		box1.pack_start(self._artist_window, True, True, 0)
-		self.pack1(box1, False, False)
-		self.pack2(self._stack, True, False)
+		box1.append(hbox)
+		box1.append(Gtk.Separator.new(orientation=Gtk.Orientation.HORIZONTAL))
+		box1.append(self._artist_window)
+		self.set_start_child(box1)
+		self.set_end_child(self._stack)
 
 	def _back_to_current_album(self, force=False):
 		song=ClientHelper.song_to_first_str_dict(self._client.currentsong())
@@ -2549,8 +2474,8 @@ class Browser(Gtk.Paned):
 	def _on_back_to_current_album_button_clicked(self, *args):
 		self._back_to_current_album()
 
-	def _on_back_to_current_album_button_press_event(self, widget, event):
-		if event.button == 1 and event.type == Gdk.EventType._2BUTTON_PRESS:
+	def _on_gesture_click_pressed(self, controller, n_press, x, y):
+		if n_press == 2:
 			self._back_to_current_album(force=True)
 
 	def _on_search_toggled(self, widget):
@@ -2574,14 +2499,9 @@ class Browser(Gtk.Paned):
 
 	def _on_mini_player(self, obj, typestring):
 		state=obj.get_property("mini-player")
-		self.set_property("no-show-all", state)
-		self.back_to_current_album_button.set_property("no-show-all", state)
-		self.search_button.set_property("no-show-all", state)
 		self.set_property("visible", not(state))
 		self.back_to_current_album_button.set_property("visible", not(state))
 		self.search_button.set_property("visible", not(state))
-		if not state:
-			self.show_all()
 
 ######################
 # playlist and cover #
@@ -2614,7 +2534,7 @@ class LyricsWindow(FocusFrame):
 		# scroll
 		scroll=Gtk.ScrolledWindow()
 		scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-		scroll.add(self._text_view)
+		scroll.set_child(self._text_view)
 
 		# connect
 		self._client.emitter.connect("disconnected", self._on_disconnected)
@@ -2622,7 +2542,7 @@ class LyricsWindow(FocusFrame):
 		self._client.emitter.handler_block(self._song_changed)
 
 		# packing
-		self.add(scroll)
+		self.set_child(scroll)
 
 	def enable(self, *args):
 		current_song=self._client.currentsong()
@@ -2633,7 +2553,7 @@ class LyricsWindow(FocusFrame):
 			if current_song["file"] != self._displayed_song_file:
 				self._refresh()
 		self._client.emitter.handler_unblock(self._song_changed)
-		GLib.idle_add(self._text_view.grab_focus)  # focus textview
+		self._text_view.grab_focus()  # focus textview
 
 	def disable(self, *args):
 		self._client.emitter.handler_block(self._song_changed)
@@ -2739,7 +2659,7 @@ class AudioType(Gtk.Label):
 		if state == "stop":
 			self.clear()
 
-class CoverEventBox(Gtk.EventBox):
+class CoverEventBox(Gtk.Box):
 	def __init__(self, client, settings):
 		super().__init__()
 		self._client=client
@@ -2748,15 +2668,20 @@ class CoverEventBox(Gtk.EventBox):
 		# album popover
 		self._album_popover=AlbumPopover(self._client, self._settings)
 
+		# event controllers
+		for i in (1,2,3):
+			controller=Gtk.GestureClick(button=i)
+			self.add_controller(controller)
+			controller.connect("pressed", self._on_gesture_click_pressed)
+
 		# connect
-		self._button_press_event=self.connect("button-press-event", self._on_button_press_event)
 		self._client.emitter.connect("disconnected", self._on_disconnected)
 
-	def _on_button_press_event(self, widget, event):
+	def _on_gesture_click_pressed(self, controller, n_press, x, y):
 		if self._settings.get_property("mini-player"):
-			if event.button == 1 and event.type == Gdk.EventType.BUTTON_PRESS:
-				window=self.get_toplevel()
-				window.begin_move_drag(1, event.x_root, event.y_root, Gdk.CURRENT_TIME)
+			if controller.get_property("button") == 1 and n_press == 1:
+				window=self.get_root()
+				window.begin_move_drag(1, event.x_root, event.y_root, Gdk.CURRENT_TIME) #TODO
 		else:
 			if self._client.connected():
 				song=ClientHelper.song_to_first_str_dict(self._client.currentsong())
@@ -2767,14 +2692,14 @@ class CoverEventBox(Gtk.EventBox):
 						artist=song.get("artist", "")
 					album=song.get("album", "")
 					year=song.get("date", "")
-					if event.button == 1 and event.type == Gdk.EventType.BUTTON_PRESS:
+					if controller.get_property("button") == 1 and n_press == 1:
 						self._client.album_to_playlist(album, artist, year, None)
-					elif event.button == 1 and event.type == Gdk.EventType._2BUTTON_PRESS:
+					elif controller.get_property("button") == 1 and n_press == 2:
 						self._client.album_to_playlist(album, artist, year, None, "play")
-					elif event.button == 2 and event.type == Gdk.EventType.BUTTON_PRESS:
+					elif controller.get_property("button") == 2 and n_press == 1:
 						self._client.album_to_playlist(album, artist, year, None, "append")
-					elif event.button == 3 and event.type == Gdk.EventType.BUTTON_PRESS:
-						self._album_popover.open(album, artist, year, None, widget, event.x, event.y)
+					elif controller.get_property("button") == 3 and n_press == 1:
+						self._album_popover.open(album, artist, year, None, self, x, y)
 
 	def _on_disconnected(self, *args):
 		self._album_popover.popdown()
@@ -2784,19 +2709,16 @@ class MainCover(Gtk.Image):
 		super().__init__()
 		self._client=client
 		self._settings=settings
-		# set default size
-		size=self._settings.get_int("track-cover")
-		self.set_size_request(size, size)
 
 		# connect
 		self._client.emitter.connect("current_song_changed", self._refresh)
 		self._client.emitter.connect("disconnected", self._on_disconnected)
 		self._client.emitter.connect("reconnected", self._on_reconnected)
-		self._settings.connect("changed::track-cover", self._on_settings_changed)
 
 	def _refresh(self, *args):
 		current_song=self._client.currentsong()
-		self.set_from_pixbuf(self._client.get_cover(current_song, self._settings.get_int("track-cover")))
+		pixbuf=self._client.get_cover(current_song)
+		self.set_from_pixbuf(pixbuf)
 
 	def _on_disconnected(self, *args):
 		size=self._settings.get_int("track-cover")
@@ -2805,11 +2727,6 @@ class MainCover(Gtk.Image):
 
 	def _on_reconnected(self, *args):
 		self.set_sensitive(True)
-
-	def _on_settings_changed(self, *args):
-		size=self._settings.get_int("track-cover")
-		self.set_size_request(size, size)
-		self._refresh()
 
 class PlaylistWindow(Gtk.Box):
 	def __init__(self, client, settings):
@@ -2826,28 +2743,33 @@ class PlaylistWindow(Gtk.Box):
 		provider.load_from_data(css)
 
 		self._back_to_current_song_button=Gtk.Button(
-			image=AutoSizedIcon("go-previous-symbolic", "icon-size-sec", self._settings),
+			icon_name="go-previous-symbolic",
 			tooltip_text=_("Scroll to current song"),
-			relief=Gtk.ReliefStyle.NONE,
+			has_frame=False,
 			can_focus=False
 		)
 		style_context=self._back_to_current_song_button.get_style_context()
 		style_context.add_provider(provider, 600)
+		self._settings.bind("icon-size-sec", self._back_to_current_song_button.get_child(), "pixel-size", Gio.SettingsBindFlags.GET)
 		clear_button=Gtk.Button(
-			image=AutoSizedIcon("edit-clear-symbolic", "icon-size-sec", self._settings),
+			icon_name="edit-clear-symbolic",
 			tooltip_text=_("Clear playlist"),
-			relief=Gtk.ReliefStyle.NONE,
+			has_frame=False,
 			action_name="mpd.clear",
 			can_focus=False
 		)
 		style_context=clear_button.get_style_context()
 		style_context.add_class("destructive-action")
 		style_context.add_provider(provider, 600)
+		self._settings.bind("icon-size-sec", clear_button.get_child(), "pixel-size", Gio.SettingsBindFlags.GET)
 
 		# treeview
 		# (track, disc, title, artist, album, duration, date, genre, file, weight)
-		self._store=Gtk.ListStore(str, str, str, str, str, str, str, str, str, Pango.Weight)
-		self._treeview=Gtk.TreeView(model=self._store,activate_on_single_click=True,reorderable=True,search_column=2,fixed_height_mode=True)
+		self._store=WorkAroundListStore(str, str, str, str, str, str, str, str, str, Pango.Weight)
+		self._treeview=Gtk.TreeView(
+			model=self._store, activate_on_single_click=True, headers_clickable=False,
+			reorderable=True, search_column=2, fixed_height_mode=True, vexpand=True
+		)
 		self._selection=self._treeview.get_selection()
 
 		# columns
@@ -2873,12 +2795,12 @@ class PlaylistWindow(Gtk.Box):
 		# scroll
 		scroll=Gtk.ScrolledWindow()
 		scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-		scroll.add(self._treeview)
+		scroll.set_child(self._treeview)
 
 		# frame
 		self._frame=FocusFrame()
 		self._frame.set_widget(self._treeview)
-		self._frame.add(scroll)
+		self._frame.set_child(scroll)
 
 		# audio infos
 		audio=AudioType(self._client)
@@ -2899,14 +2821,22 @@ class PlaylistWindow(Gtk.Box):
 		action_bar.pack_end(audio)
 
 		# song popover
-		self._song_popover=SongPopover(self._client, show_buttons=False)
+		self._song_popover=SongPopover(self._client, self._treeview, show_buttons=False)
+
+		# event controllers
+		for i in (2,3):
+			controller=Gtk.GestureClick(button=i)
+			self._treeview.add_controller(controller)
+			controller.connect("pressed", self._on_gesture_click_pressed)
+		controller_key=Gtk.EventControllerKey()
+		self._treeview.add_controller(controller_key)
+		controller_key.connect("key-released", self._on_key_released)
 
 		# connect
 		self._treeview.connect("row-activated", self._on_row_activated)
-		self._treeview.connect("button-press-event", self._on_button_press_event)
-		self._treeview.connect("key-release-event", self._on_key_release_event)
-		self._treeview.connect("drag-begin", lambda *args: self._frame.disable())
-		self._treeview.connect("drag-end", lambda *args: self._frame.enable())
+		# TODO
+#		self._treeview.connect("drag-begin", lambda *args: self._frame.disable())
+#		self._treeview.connect("drag-end", lambda *args: self._frame.enable())
 		self._row_deleted=self._store.connect("row-deleted", self._on_row_deleted)
 		self._row_inserted=self._store.connect("row-inserted", self._on_row_inserted)
 		self._back_to_current_song_button.connect("clicked", self._on_back_to_current_song_button_clicked)
@@ -2922,8 +2852,8 @@ class PlaylistWindow(Gtk.Box):
 		self._settings.connect("changed::column-permutation", self._load_settings)
 
 		# packing
-		self.pack_start(self._frame, True, True, 0)
-		self.pack_end(action_bar, False, False, 0)
+		self.append(self._frame)
+		self.append(action_bar)
 
 	def _on_column_width(self, obj, typestring, pos):
 		self._settings.array_modify("ai", "column-sizes", pos, obj.get_property("fixed-width"))
@@ -2976,17 +2906,18 @@ class PlaylistWindow(Gtk.Box):
 		except:
 			self._selection.unselect_all()
 
-	def _on_button_press_event(self, widget, event):
-		path_re=widget.get_path_at_pos(int(event.x), int(event.y))
+	def _on_gesture_click_pressed(self, controller, n_press, raw_x, raw_y):
+		x,y=self._treeview.convert_widget_to_bin_window_coords(raw_x,raw_y)
+		path_re=self._treeview.get_path_at_pos(x, y)
 		if path_re is not None:
 			path=path_re[0]
-			if event.button == 2 and event.type == Gdk.EventType.BUTTON_PRESS:
+			if controller.get_property("button") == 2 and n_press == 1:
 				self._store.remove(self._store.get_iter(path))
-			elif event.button == 3 and event.type == Gdk.EventType.BUTTON_PRESS:
-				self._song_popover.open(self._store[path][8], widget, int(event.x), int(event.y))
+			elif controller.get_property("button") == 3 and n_press == 1:
+				self._song_popover.open(self._store[path][8], raw_x, raw_y)
 
-	def _on_key_release_event(self, widget, event):
-		if event.keyval == Gdk.keyval_from_name("Delete"):
+	def _on_key_released(self, controller, keyval, keycode, state):
+		if keyval == Gdk.keyval_from_name("Delete"):
 			treeview, treeiter=self._selection.get_selected()
 			if treeiter is not None:
 				try:
@@ -3092,19 +3023,22 @@ class PlaylistWindow(Gtk.Box):
 			if treeiter is not None:
 				path=self._store.get_path(treeiter)
 				cell=self._treeview.get_cell_area(path, None)
-				self._song_popover.open(self._store[path][8], self._treeview, int(cell.x), int(cell.y))
+				x,y=self._treeview.convert_bin_window_to_widget_coords(cell.x, cell.y)
+				self._song_popover.open(self._store[path][8], x, y)
 
 	def _on_mini_player(self, obj, typestring):
+		# TODO
 		if obj.get_property("mini-player"):
-			self.set_property("no-show-all", True)
+#			self.set_property("no-show-all", True)
 			self.set_property("visible", False)
 		else:
-			self.set_property("no-show-all", False)
-			self.show_all()
+			self.set_property("visible", True)
+#			self.set_property("no-show-all", False)
+#			self.show_all()
 
 class CoverPlaylistWindow(Gtk.Paned):
 	def __init__(self, client, settings):
-		super().__init__()
+		super().__init__(shrink_start_child=False, shrink_end_child=False, resize_start_child=False)
 		self._client=client
 		self._settings=settings
 
@@ -3117,7 +3051,7 @@ class CoverPlaylistWindow(Gtk.Paned):
 
 		# lyrics button
 		self.lyrics_button=Gtk.ToggleButton(
-			image=Gtk.Image.new_from_icon_name("media-view-subtitles-symbolic", Gtk.IconSize.BUTTON),
+			child=Gtk.Image.new_from_icon_name("media-view-subtitles-symbolic"),
 			tooltip_text=_("Show lyrics")
 		)
 		self.lyrics_button.set_can_focus(False)
@@ -3133,7 +3067,7 @@ class CoverPlaylistWindow(Gtk.Paned):
 		self._lyrics_button_revealer=Gtk.Revealer()
 		self._lyrics_button_revealer.set_halign(Gtk.Align.END)
 		self._lyrics_button_revealer.set_valign(Gtk.Align.START)
-		self._lyrics_button_revealer.add(self.lyrics_button)
+		self._lyrics_button_revealer.set_child(self.lyrics_button)
 
 		# stack
 		self._stack=Gtk.Stack(transition_type=Gtk.StackTransitionType.OVER_DOWN_UP)
@@ -3149,11 +3083,11 @@ class CoverPlaylistWindow(Gtk.Paned):
 
 		# packing
 		overlay=Gtk.Overlay()
-		overlay.add(main_cover)
+		overlay.set_child(main_cover)
 		overlay.add_overlay(self._stack)
 		overlay.add_overlay(self._lyrics_button_revealer)
-		self.pack1(overlay, False, False)
-		self.pack2(self._playlist_window, True, False)
+		self.set_start_child(overlay)
+		self.set_end_child(self._playlist_window)
 		self._on_settings_changed()  # hide lyrics button
 
 	def _on_reconnected(self, *args):
@@ -3181,28 +3115,27 @@ class CoverPlaylistWindow(Gtk.Paned):
 # control widgets #
 ###################
 
-class PlaybackControl(Gtk.ButtonBox):
+class PlaybackControl(Gtk.Box):
 	def __init__(self, client, settings):
-		super().__init__(layout_style=Gtk.ButtonBoxStyle.EXPAND)
+		super().__init__(css_classes=["linked"])
 		self._client=client
 		self._settings=settings
 
-		# widgets
-		self._play_icon=AutoSizedIcon("media-playback-start-symbolic", "icon-size", self._settings)
-		self._pause_icon=AutoSizedIcon("media-playback-pause-symbolic", "icon-size", self._settings)
-		self._play_button=Gtk.Button(image=self._play_icon)
-		self._play_button.set_action_name("mpd.toggle-play")
-		self._play_button.set_can_focus(False)
-		self._stop_button=Gtk.Button(image=AutoSizedIcon("media-playback-stop-symbolic", "icon-size", self._settings))
-		self._stop_button.set_property("no-show-all", not(self._settings.get_boolean("show-stop")))
-		self._stop_button.set_action_name("mpd.stop")
-		self._stop_button.set_can_focus(False)
-		self._prev_button=Gtk.Button(image=AutoSizedIcon("media-skip-backward-symbolic", "icon-size", self._settings))
-		self._prev_button.set_action_name("mpd.prev")
-		self._prev_button.set_can_focus(False)
-		self._next_button=Gtk.Button(image=AutoSizedIcon("media-skip-forward-symbolic", "icon-size", self._settings))
-		self._next_button.set_action_name("mpd.next")
-		self._next_button.set_can_focus(False)
+
+		# buttons
+		self._buttons={}
+		data=(
+			("prev", "media-skip-backward-symbolic", "mpd.prev"),
+			("play", "media-playback-start-symbolic", "mpd.toggle-play"),
+			("stop", "media-playback-stop-symbolic", "mpd.stop"),
+			("next", "media-skip-forward-symbolic", "mpd.next"),
+		)
+		for name, icon, action in data:
+			button=Gtk.Button(icon_name=icon, action_name=action, can_focus=False)
+			self._settings.bind("icon-size", button.get_child(), "pixel-size", Gio.SettingsBindFlags.GET)
+			self.append(button)
+			self._buttons[name]=button
+		self._buttons["stop"].set_property("visible", self._settings.get_boolean("show-stop")) # TODO
 
 		# connect
 		self._settings.connect("notify::mini-player", self._on_mini_player)
@@ -3212,12 +3145,6 @@ class PlaybackControl(Gtk.ButtonBox):
 		self._client.emitter.connect("current_song_changed", self._refresh_tooltips)
 		self._client.emitter.connect("disconnected", self._on_disconnected)
 
-		# packing
-		self.pack_start(self._prev_button, True, True, 0)
-		self.pack_start(self._play_button, True, True, 0)
-		self.pack_start(self._stop_button, True, True, 0)
-		self.pack_start(self._next_button, True, True, 0)
-
 	def _refresh_tooltips(self, *args):
 		try:
 			songs=self._client.playlistinfo()
@@ -3226,116 +3153,94 @@ class PlaybackControl(Gtk.ButtonBox):
 			rest=ClientHelper.calc_display_length(songs[song+1:])
 			elapsed_titles=ngettext("{titles} title", "{titles} titles", song).format(titles=song)
 			rest_titles=ngettext("{titles} title", "{titles} titles", (len(songs)-(song+1))).format(titles=(len(songs)-(song+1)))
-			self._prev_button.set_tooltip_text(" ".join((elapsed_titles, "({length})".format(length=elapsed))))
-			self._next_button.set_tooltip_text(" ".join((rest_titles, "({length})".format(length=rest))))
+			self._buttons["prev"].set_tooltip_text(" ".join((elapsed_titles, "({length})".format(length=elapsed))))
+			self._buttons["next"].set_tooltip_text(" ".join((rest_titles, "({length})".format(length=rest))))
 		except:
-			self._prev_button.set_tooltip_text("")
-			self._next_button.set_tooltip_text("")
+			self._buttons["prev"].set_tooltip_text("")
+			self._buttons["next"].set_tooltip_text("")
 
 	def _on_state(self, emitter, state):
 		if state == "play":
-			self._play_button.set_image(self._pause_icon)
-		elif state == "pause":
-			self._play_button.set_image(self._play_icon)
+			self._buttons["play"].set_icon_name("media-playback-pause-symbolic")
 		else:
-			self._play_button.set_image(self._play_icon)
+			self._buttons["play"].set_icon_name("media-playback-start-symbolic")
 
 	def _on_disconnected(self, *args):
-		self._prev_button.set_tooltip_text("")
-		self._next_button.set_tooltip_text("")
+		self._buttons["prev"].set_tooltip_text("")
+		self._buttons["next"].set_tooltip_text("")
 
 	def _on_mini_player(self, obj, typestring):
 		self._on_show_stop_changed()
 
 	def _on_show_stop_changed(self, *args):
 		visibility=(self._settings.get_boolean("show-stop") and not self._settings.get_property("mini-player"))
-		self._stop_button.set_property("visible", visibility)
-		self._stop_button.set_property("no-show-all", not(visibility))
+		self._buttons["stop"].set_property("visible", visibility)
 
 class SeekBar(Gtk.Box):
 	def __init__(self, client):
 		super().__init__(hexpand=True)
 		self._client=client
-		self._update=True
-		self._jumped=False
 
 		# labels
 		self._elapsed=Gtk.Label(width_chars=5)
 		self._rest=Gtk.Label(width_chars=6)
 
-		# event boxes
-		self._elapsed_event_box=Gtk.EventBox()
-		self._rest_event_box=Gtk.EventBox()
-
 		# progress bar
-		self._scale=Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL)
-		self._scale.set_can_focus(False)
-		self._scale.set_show_fill_level(True)
-		self._scale.set_restrict_to_fill_level(False)
-		self._scale.set_draw_value(False)
-		self._scale.set_increments(10, 60)
+		self._scale=Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL, draw_value=False, hexpand=True, can_focus=False)
+		self._scale.set_increments(10, 10)
 		self._adjustment=self._scale.get_adjustment()
 
-		# css (scale)
-		style_context=self._scale.get_style_context()
-		provider=Gtk.CssProvider()
-		css=b"""scale fill { background-color: @theme_selected_bg_color; }"""
-		provider.load_from_data(css)
-		style_context.add_provider(provider, 600)
+		# popover
+		self._popover=Gtk.Popover(autohide=False, has_arrow=False)
+		self._rect=Gdk.Rectangle()
+		self._time_label=Gtk.Label()
+		self._popover.set_child(self._time_label)
+		self._popover.set_parent(self)
+		self._popover.set_position(Gtk.PositionType.TOP)
+
+		# event controllers
+		for label, sign1, sign3 in ((self._elapsed, "-", "+"), (self._rest, "+", "-")):
+			con1=Gtk.GestureClick(button=1)
+			con3=Gtk.GestureClick(button=3)
+			label.add_controller(con1)
+			label.add_controller(con3)
+			con1.connect("released",
+				lambda con, n, x, y, sign: self._client.seekcur(sign+str(self._adjustment.get_property("step-increment"))), sign1
+			)
+			con3.connect("released",
+				lambda con, n, x, y, sign: self._client.seekcur(sign+str(self._adjustment.get_property("step-increment"))), sign3
+			)
+		controller_motion=Gtk.EventControllerMotion()
+		self._scale.add_controller(controller_motion)
+		controller_motion.connect("motion", self._on_pointer_motion)
+		controller_motion.connect("leave", self._on_pointer_leave)
 
 		# connect
-		self._elapsed_event_box.connect("button-release-event", self._on_elapsed_button_release_event)
-		self._rest_event_box.connect("button-release-event", self._on_rest_button_release_event)
 		self._scale.connect("change-value", self._on_change_value)
-		self._scale.connect("scroll-event", lambda *args: True)  # disable mouse wheel
-		self._scale.connect("button-press-event", self._on_scale_button_press_event)
-		self._scale.connect("button-release-event", self._on_scale_button_release_event)
 		self._client.emitter.connect("disconnected", self._disable)
 		self._client.emitter.connect("state", self._on_state)
 		self._client.emitter.connect("elapsed_changed", self._refresh)
 
 		# packing
-		self._elapsed_event_box.add(self._elapsed)
-		self._rest_event_box.add(self._rest)
-		self.pack_start(self._elapsed_event_box, False, False, 0)
-		self.pack_start(self._scale, True, True, 0)
-		self.pack_end(self._rest_event_box, False, False, 0)
+		self.append(self._elapsed)
+		self.append(self._scale)
+		self.append(self._rest)
 
 	def _refresh(self, emitter, elapsed, duration):
 		self.set_sensitive(True)
 		if elapsed > duration:  # fix display error
 			elapsed=duration
 		self._adjustment.set_upper(duration)
-		if self._update:
-			self._scale.set_value(elapsed)
-			self._elapsed.set_text(ClientHelper.seconds_to_display_time(int(elapsed)))
-			self._rest.set_text("-"+ClientHelper.seconds_to_display_time(int(duration-elapsed)))
-		self._scale.set_fill_level(elapsed)
+		self._elapsed.set_text(ClientHelper.seconds_to_display_time(int(elapsed)))
+		self._rest.set_text("-"+ClientHelper.seconds_to_display_time(int(duration-elapsed)))
+		self._scale.set_value(elapsed)
 
 	def _disable(self, *args):
+		self._popover.popdown()
 		self.set_sensitive(False)
-		self._scale.set_fill_level(0)
 		self._scale.set_range(0, 0)
 		self._elapsed.set_text("––∶––")
 		self._rest.set_text("––∶––")
-
-	def _on_scale_button_press_event(self, widget, event):
-		if event.button == 1 and event.type == Gdk.EventType.BUTTON_PRESS:
-			self._update=False
-			self._scale.set_has_origin(False)
-		elif event.button == 3 and event.type == Gdk.EventType.BUTTON_PRESS:
-			self._jumped=False
-
-	def _on_scale_button_release_event(self, widget, event):
-		if event.button == 1:
-			self._update=True
-			self._scale.set_has_origin(True)
-			if self._jumped:  # actual seek
-				self._client.seekcur(self._scale.get_value())
-				self._jumped=False
-			else:  # restore state
-				status=self._client.status()
-				self._refresh(None, float(status["elapsed"]), float(status["duration"]))
 
 	def _on_change_value(self, range, scroll, value):  # value is inaccurate (can be above upper limit)
 		if (scroll == Gtk.ScrollType.STEP_BACKWARD or scroll == Gtk.ScrollType.STEP_FORWARD or
@@ -3343,64 +3248,79 @@ class SeekBar(Gtk.Box):
 			self._client.seekcur(value)
 		elif scroll == Gtk.ScrollType.JUMP:
 			duration=self._adjustment.get_upper()
-			if value > duration:  # fix display error
-				elapsed=duration
+			current_pos=self._scale.get_value()
+			if value >= duration:
+				self._scale.set_sensitive(False)
+				pos=duration
+				self._scale.set_sensitive(True)
+				self._popover.popdown()
+			elif value <= 0:
+				pos=0
+				self._popover.popdown()
 			else:
-				elapsed=value
-			self._elapsed.set_text(ClientHelper.seconds_to_display_time(int(elapsed)))
-			self._rest.set_text("-"+ClientHelper.seconds_to_display_time(int(duration-elapsed)))
-			self._jumped=True
+				pos=value
+#			if abs(current_pos-pos) > 0.1:
+			try:
+				self._client.seekcur(pos)
+			except:
+				pass
+#			else:
+#				print("a")
 
-	def _on_elapsed_button_release_event(self, widget, event):
-		if event.button == 1:
-			self._client.seekcur("-"+str(self._adjustment.get_property("step-increment")))
-		elif event.button == 3:
-			self._client.seekcur("+"+str(self._adjustment.get_property("step-increment")))
+	def _on_pointer_motion(self, controller, x, y):
+		rect=self._scale.get_range_rect()
+		duration=self._adjustment.get_upper()
+		if self._scale.get_direction() == Gtk.TextDirection.RTL:
+			elapsed=int(((rect.width-x)/rect.width*self._adjustment.get_upper()))
+		else:
+			elapsed=int((x/rect.width*self._adjustment.get_upper()))
+		if elapsed > duration:  # fix display error
+			elapsed=int(duration)
+		elif elapsed < 0:
+			elapsed=0
+		self._rect.x=self._scale.translate_coordinates(self, x, y)[0] # fix position error
+		self._time_label.set_text(ClientHelper.seconds_to_display_time(elapsed))
+		self._popover.set_pointing_to(self._rect)
+		self._popover.popup()
 
-	def _on_rest_button_release_event(self, widget, event):
-		if event.button == 1:
-			self._client.seekcur("+"+str(self._adjustment.get_property("step-increment")))
-		elif event.button == 3:
-			self._client.seekcur("-"+str(self._adjustment.get_property("step-increment")))
+	def _on_pointer_leave(self, *args):
+		self._popover.popdown()
 
 	def _on_state(self, emitter, state):
 		if state == "stop":
 			self._disable()
 
 class OutputPopover(Gtk.Popover):
-	def __init__(self, client, relative):
+	def __init__(self, client, parent):
 		super().__init__()
-		self.set_relative_to(relative)
+		self.set_parent(parent)
 		self._client=client
 
 		# widgets
-		box=Gtk.Box(orientation=Gtk.Orientation.VERTICAL, border_width=9)
+		box=Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
 		for output in self._client.outputs():
-			button=Gtk.ModelButton(label="{} ({})".format(output["outputname"], output["plugin"]), role=Gtk.ButtonRole.CHECK)
-			button.get_child().set_property("xalign", 0)
+			button=Gtk.CheckButton(label="{} ({})".format(output["outputname"], output["plugin"]))
 			if output["outputenabled"] == "1":
 				button.set_property("active", True)
-			button.connect("clicked", self._on_button_clicked, output["outputid"])
-			box.pack_start(button, False, False, 0)
+			button.connect("toggled", self._on_button_clicked, output["outputid"])
+			box.append(button)
 
 		#connect
-		self.connect("closed", lambda *args: self.destroy())
+#		self.connect("closed", lambda *args: self.destroy()) TODO
 
 		# packing
-		self.add(box)
-		box.show_all()
+		self.set_child(box)
+		box.show()
 
 	def _on_button_clicked(self, button, out_id):
 		if button.get_property("active"):
-			self._client.disableoutput(out_id)
-			button.set_property("active", False)
-		else:
 			self._client.enableoutput(out_id)
-			button.set_property("active", True)
+		else:
+			self._client.disableoutput(out_id)
 
 class VolumeButton(Gtk.VolumeButton):
 	def __init__(self, client, settings):
-		super().__init__(use_symbolic=True, size=settings.get_gtk_icon_size("icon-size"), can_focus=False)
+		super().__init__(use_symbolic=True, can_focus=False)
 		self._client=client
 		self._settings=settings
 		self._popover=None
@@ -3409,13 +3329,17 @@ class VolumeButton(Gtk.VolumeButton):
 		self._adj.set_page_increment(0.1)
 		self._adj.set_upper(0)  # do not allow volume change by user when MPD has not yet reported volume (no output enabled/avail)
 
+		# event controllers
+		gesture_click_button3=Gtk.GestureClick(button=3)
+		self.add_controller(gesture_click_button3)
+		gesture_click_button3.connect("pressed", self._on_gesture_click_pressed)
+
 		# connect
 		self._changed=self.connect("value-changed", self._set_volume)
 		self._client.emitter.connect("volume_changed", self._refresh)
 		self._client.emitter.connect("disconnected", self._on_disconnected)
 		self._client.emitter.connect("reconnected", self._on_reconnected)
-		self.connect("button-press-event", self._on_button_press_event)
-		self._settings.connect("changed::icon-size", self._on_icon_size_changed)
+		self._settings.bind("icon-size", self.get_first_child().get_first_child(), "pixel-size", Gio.SettingsBindFlags.GET)
 
 	def _set_volume(self, widget, value):
 		self._client.setvol(str(int(value*100)))
@@ -3430,10 +3354,9 @@ class VolumeButton(Gtk.VolumeButton):
 			self.set_value(volume/100)
 		self.handler_unblock(self._changed)
 
-	def _on_button_press_event(self, widget, event):
-		if event.button == 3 and event.type == Gdk.EventType.BUTTON_PRESS:
-			self._popover=OutputPopover(self._client, self)
-			self._popover.popup()
+	def _on_gesture_click_pressed(self, controller, n_press, x, y):
+		self._popover=OutputPopover(self._client, self)
+		self._popover.popup()
 
 	def _on_reconnected(self, *args):
 		self.set_sensitive(True)
@@ -3445,12 +3368,9 @@ class VolumeButton(Gtk.VolumeButton):
 			self._popover.popdown()
 			self._popover=None
 
-	def _on_icon_size_changed(self, *args):
-		self.set_property("size", self._settings.get_gtk_icon_size("icon-size"))
-
-class PlaybackOptions(Gtk.ButtonBox):
+class PlaybackOptions(Gtk.Box):
 	def __init__(self, client, settings):
-		super().__init__(layout_style=Gtk.ButtonBoxStyle.EXPAND)
+		super().__init__(css_classes=["linked"])
 		self._client=client
 		self._settings=settings
 
@@ -3463,20 +3383,25 @@ class PlaybackOptions(Gtk.ButtonBox):
 			("consume", "org.mpdevil.mpdevil-consume-symbolic", _("Consume mode")),
 		)
 		for name, icon, tooltip in data:
-			button=Gtk.ToggleButton(image=AutoSizedIcon(icon, "icon-size", self._settings), tooltip_text=tooltip, can_focus=False)
+			button=Gtk.ToggleButton(icon_name=icon, tooltip_text=tooltip, can_focus=False)
+			self._settings.bind("icon-size", button.get_child(), "pixel-size", Gio.SettingsBindFlags.GET)
 			handler=button.connect("toggled", self._set_option, name)
-			self.pack_start(button, True, True, 0)
+			self.append(button)
 			self._buttons[name]=(button, handler)
 
 		# css
 		self._provider=Gtk.CssProvider()
 		self._provider.load_from_data(b"""image {color: @error_color;}""")  # red icon
 
+		# event controllers
+		gesture_click_button3=Gtk.GestureClick(button=3)
+		self._buttons["single"][0].add_controller(gesture_click_button3)
+		gesture_click_button3.connect("pressed", self._on_gesture_click_pressed)
+
 		# connect
 		for name in ("repeat", "random", "consume"):
 			self._client.emitter.connect(name, self._button_refresh, name)
 		self._client.emitter.connect("single", self._single_refresh)
-		self._buttons["single"][0].connect("button-press-event", self._on_single_button_press_event)
 		self._client.emitter.connect("disconnected", self._on_disconnected)
 		self._client.emitter.connect("reconnected", self._on_reconnected)
 		self._settings.connect("notify::mini-player", self._on_mini_player)
@@ -3497,18 +3422,17 @@ class PlaybackOptions(Gtk.ButtonBox):
 		self._buttons["single"][0].handler_block(self._buttons["single"][1])
 		self._buttons["single"][0].set_active((val in ("1", "oneshot")))
 		if val == "oneshot":
-			self._buttons["single"][0].get_image().get_style_context().add_provider(self._provider, 600)
+			self._buttons["single"][0].get_child().get_style_context().add_provider(self._provider, 600)
 		else:
-			self._buttons["single"][0].get_image().get_style_context().remove_provider(self._provider)
+			self._buttons["single"][0].get_child().get_style_context().remove_provider(self._provider)
 		self._buttons["single"][0].handler_unblock(self._buttons["single"][1])
 
-	def _on_single_button_press_event(self, widget, event):
-		if event.button == 3 and event.type == Gdk.EventType.BUTTON_PRESS:
-			state=self._client.status()["single"]
-			if state == "oneshot":
-				self._client.single("0")
-			else:
-				self._client.single("oneshot")
+	def _on_gesture_click_pressed(self, controller, n_press, x, y):
+		state=self._client.status()["single"]
+		if state == "oneshot":
+			self._client.single("0")
+		else:
+			self._client.single("oneshot")
 
 	def _on_disconnected(self, *args):
 		self.set_sensitive(False)
@@ -3520,12 +3444,7 @@ class PlaybackOptions(Gtk.ButtonBox):
 		self.set_sensitive(True)
 
 	def _on_mini_player(self, obj, typestring):
-		if obj.get_property("mini-player"):
-			self.set_property("no-show-all", True)
-			self.set_property("visible", False)
-		else:
-			self.set_property("no-show-all", False)
-			self.show_all()
+		self.set_property("visible", not(obj.get_property("mini-player")))
 
 ###################
 # MPD gio actions #
@@ -3602,7 +3521,7 @@ class MPDActionGroup(Gio.SimpleActionGroup):
 ####################
 # shortcuts window #
 ####################
-class ShortcutsWindow(Gtk.ShortcutsWindow):
+class ShortcutsWindow(Gtk.ShortcutsWindow): #TODO
 	def __init__(self):
 		super().__init__()
 		general_group=Gtk.ShortcutsGroup(title=_("General"), visible=True)
@@ -3649,7 +3568,7 @@ class ShortcutsWindow(Gtk.ShortcutsWindow):
 		)
 		for accel, title, subtitle, group in shortcut_data:
 			shortcut=Gtk.ShortcutsShortcut(visible=True, accelerator=accel, title=title, subtitle=subtitle)
-			group.pack_start(shortcut, False, False, 0)
+			group.append(shortcut)
 
 		self.add(section)
 
@@ -3665,8 +3584,7 @@ class ConnectionNotify(Gtk.Revealer):
 
 		# widgets
 		self._label=Gtk.Label(wrap=True)
-		close_button=Gtk.Button(image=Gtk.Image.new_from_icon_name("window-close-symbolic", Gtk.IconSize.BUTTON))
-		close_button.set_relief(Gtk.ReliefStyle.NONE)
+		close_button=Gtk.Button(child=Gtk.Image.new_from_icon_name("window-close-symbolic"), has_frame=False)
 		connect_button=Gtk.Button(label=_("Connect"))
 		settings_button=Gtk.Button(label=_("Settings"))
 		settings_button.set_action_name("win.profile-settings")
@@ -3680,11 +3598,11 @@ class ConnectionNotify(Gtk.Revealer):
 		# packing
 		box=Gtk.Box(spacing=12)
 		box.get_style_context().add_class("app-notification")
-		box.pack_start(self._label, False, True, 6)
-		box.pack_end(close_button, False, True, 0)
-		box.pack_end(connect_button, False, True, 0)
-		box.pack_end(settings_button, False, True, 0)
-		self.add(box)
+		box.append(self._label)
+		box.append(settings_button)
+		box.append(connect_button)
+		box.append(close_button)
+		self.set_child(box)
 
 	def _on_connection_error(self, *args):
 		active=self._settings.get_int("active-profile")
@@ -3704,6 +3622,20 @@ class ConnectionNotify(Gtk.Revealer):
 
 	def _on_connect_button_clicked(self, *args):
 		self._client.reconnect()
+
+class Title(Gtk.Box):
+	def __init__(self):
+		super().__init__(orientation=Gtk.Orientation.VERTICAL, homogeneous=True)
+		self._title=Gtk.Label()
+		self._subtitle=Gtk.Label()
+		self.append(self._title)
+		self.append(self._subtitle)
+
+	def set_title(self, text):
+		self._title.set_markup("<b>"+text.replace("&", "&amp;")+"</b>")
+
+	def set_subtitle(self, text):
+		self._subtitle.set_markup("<sub>"+text.replace("&", "&amp;")+"</sub>")
 
 class MainWindow(Gtk.ApplicationWindow):
 	def __init__(self, app, client, settings):
@@ -3738,18 +3670,12 @@ class MainWindow(Gtk.ApplicationWindow):
 		self._profiles_action.connect("change-state", self._on_profiles)
 		self.add_action(self._profiles_action)
 
-		# shortcuts
-		shortcuts_window=ShortcutsWindow()
-		self.set_help_overlay(shortcuts_window)
-		shortcuts_window.set_modal(False)
+		# shortcuts TODO
+#		shortcuts_window=ShortcutsWindow()
+#		self.set_help_overlay(shortcuts_window)
+#		shortcuts_window.set_modal(False)
 
 		# widgets
-		if self._use_csd:
-			icons={"open-menu-symbolic": Gtk.Image.new_from_icon_name("open-menu-symbolic", Gtk.IconSize.BUTTON)}
-		else:
-			icons={"open-menu-symbolic": AutoSizedIcon("open-menu-symbolic", "icon-size", self._settings)}
-
-		self._paned=Gtk.Paned()
 		self._browser=Browser(self._client, self._settings)
 		self._cover_playlist_window=CoverPlaylistWindow(self._client, self._settings)
 		playback_control=PlaybackControl(self._client, self._settings)
@@ -3777,62 +3703,66 @@ class MainWindow(Gtk.ApplicationWindow):
 		menu.append_section(None, subsection)
 
 		# menu button / popover
-		self._menu_button=Gtk.MenuButton(image=icons["open-menu-symbolic"], tooltip_text=_("Menu"))
-		self._menu_button.set_can_focus(False)
-		menu_popover=Gtk.Popover.new_from_model(self._menu_button, menu)
-		self._menu_button.set_popover(menu_popover)
+		self._menu_button=Gtk.MenuButton(menu_model=menu, tooltip_text=_("Menu"), icon_name="open-menu-symbolic", can_focus=False)
+		if not self._use_csd:
+			self._settings.bind("icon-size",self._menu_button.get_first_child().get_first_child(),"pixel-size",Gio.SettingsBindFlags.GET)
 
 		# action bar
-		action_bar=Gtk.ActionBar()
-		action_bar.pack_start(playback_control)
-		action_bar.pack_start(seek_bar)
-		action_bar.pack_start(playback_options)
-		action_bar.pack_start(volume_button)
+		action_bar=Gtk.Box(spacing=6, margin_top=6, margin_bottom=6, margin_start=6, margin_end=6)
+		action_bar.append(playback_control)
+		action_bar.append(seek_bar)
+		action_bar.append(playback_options)
+		action_bar.append(volume_button)
 
 		# connect
 		self._settings.connect("changed::profiles", self._refresh_profiles_menu)
 		self._settings.connect("changed::active-profile", self._on_active_profile_changed)
 		self._settings.connect_after("notify::mini-player", self._on_mini_player)
-		self._settings.connect_after("notify::cursor-watch", self._on_cursor_watch)
 		self._settings.connect("changed::playlist-right", self._on_playlist_pos_changed)
 		self._client.emitter.connect("current_song_changed", self._on_song_changed)
 		self._client.emitter.connect("disconnected", self._on_disconnected)
 		self._client.emitter.connect("reconnected", self._on_reconnected)
+
 		# auto save window state and size
-		self.connect("size-allocate", self._on_size_allocate)
-		self._settings.bind("maximize", self, "is-maximized", Gio.SettingsBindFlags.SET)
+		self._settings.bind("width", self, "default-width", Gio.SettingsBindFlags.SET)
+		self._settings.bind("height", self, "default-height", Gio.SettingsBindFlags.SET)
+		self._settings.bind("maximize", self, "maximized", Gio.SettingsBindFlags.SET)
+
 		# save and restore mini player
 		self._settings.bind("mini-player", self._settings, "mini-player", Gio.SettingsBindFlags.DEFAULT)
 
 		# packing
-		self._on_playlist_pos_changed()  # set orientation
-		self._paned.pack1(self._browser, True, False)
-		self._paned.pack2(self._cover_playlist_window, False, False)
+		self._paned=Gtk.Paned(vexpand=True, shrink_start_child=False, shrink_end_child=False, resize_end_child=False)
+		self._on_playlist_pos_changed()  # set paned orientation
+		self._paned.set_start_child(self._browser)
+		self._paned.set_end_child(self._cover_playlist_window)
 		vbox=Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-		vbox.pack_start(self._paned, True, True, 0)
-		vbox.pack_start(action_bar, False, False, 0)
+		vbox.append(self._paned)
+		vbox.append(Gtk.Separator.new(orientation=Gtk.Orientation.HORIZONTAL))
+		vbox.append(action_bar)
 		overlay=Gtk.Overlay()
-		overlay.add(vbox)
+		overlay.set_child(vbox)
 		overlay.add_overlay(connection_notify)
 		if self._use_csd:
-			self._header_bar=Gtk.HeaderBar()
-			self._header_bar.set_show_close_button(True)
+			self._header_bar=Gtk.HeaderBar(title_widget=Title())
 			self.set_titlebar(self._header_bar)
 			self._header_bar.pack_start(self._browser.back_to_current_album_button)
 			self._header_bar.pack_end(self._menu_button)
 			self._header_bar.pack_end(self._browser.search_button)
 		else:
-			action_bar.pack_start(self._menu_button)
-		self.add(overlay)
+			action_bar.append(self._menu_button)
+		self.set_child(overlay)
 		self._client.emitter.emit("disconnected")  # bring player in defined state
 		# indicate connection process in window title
 		if self._use_csd:
-			self._header_bar.set_subtitle(_("connecting…"))
+			self._header_bar.get_title_widget().set_subtitle(_("connecting…"))
 		else:
 			self.set_title("mpdevil "+_("connecting…"))
-		self.show_all()
-		while Gtk.events_pending():  # ensure window is visible
-			Gtk.main_iteration_do(True)
+		self.show()
+		# ensure window is visible
+		main=GLib.main_context_default()
+		while main.pending():
+			main.iteration()
 		# restore paned settings when window is visible (fixes a bug when window is maximized)
 		self._cover_playlist_window.set_position(self._settings.get_int("paned0"))
 		self._browser.set_position(self._settings.get_int("paned1"))
@@ -3860,17 +3790,12 @@ class MainWindow(Gtk.ApplicationWindow):
 
 	def _on_settings(self, action, param):
 		settings=SettingsDialog(self, self._client, self._settings)
-		settings.run()
-		settings.destroy()
 
 	def _on_profile_settings(self, action, param):
 		settings=SettingsDialog(self, self._client, self._settings, "profiles")
-		settings.run()
-		settings.destroy()
 
 	def _on_stats(self, action, param):
 		stats=ServerStats(self, self._client, self._settings)
-		stats.destroy()
 
 	def _on_help(self, action, param):
 		Gtk.show_uri_on_window(self, "https://github.com/SoongNoonien/mpdevil/wiki/Usage", Gdk.CURRENT_TIME)
@@ -3907,26 +3832,24 @@ class MainWindow(Gtk.ApplicationWindow):
 	def _on_song_changed(self, *args):
 		song=self._client.currentsong()
 		if song == {}:
+			self.set_title("mpdevil")
 			if self._use_csd:
-				self.set_title("mpdevil")
-				self._header_bar.set_subtitle("")
-			else:
-				self.set_title("mpdevil")
+				self._header_bar.get_title_widget().set_title("mpdevil")
+				self._header_bar.get_title_widget().set_subtitle("")
 		else:
 			song=ClientHelper.song_to_str_dict(ClientHelper.pepare_song_for_display(song))
 			if song["date"] == "":
 				date=""
 			else:
 				date=" ("+song["date"]+")"
+			self.set_title(song["title"]+" - "+song["artist"]+" - "+song["album"]+date)
 			if self._use_csd:
-				self.set_title(song["title"]+" - "+song["artist"])
-				self._header_bar.set_subtitle(song["album"]+date)
-			else:
-				self.set_title(song["title"]+" - "+song["artist"]+" - "+song["album"]+date)
+				self._header_bar.get_title_widget().set_title(song["title"]+" - "+song["artist"])
+				self._header_bar.get_title_widget().set_subtitle(song["album"]+date)
 			if self._settings.get_boolean("send-notify"):
 				if not self.is_active() and self._client.status()["state"] == "play":
 					notify=Notify.Notification.new(song["title"], song["artist"]+"\n"+song["album"]+date)
-					pixbuf=self._client.get_cover(song, 400)
+					pixbuf=self._client.get_cover(song)
 					notify.set_image_from_pixbuf(pixbuf)
 					notify.show()
 
@@ -3937,17 +3860,10 @@ class MainWindow(Gtk.ApplicationWindow):
 	def _on_disconnected(self, *args):
 		self.set_title("mpdevil")
 		if self._use_csd:
-			self._header_bar.set_subtitle("")
+			self._header_bar.get_title_widget().set_title("mpdevil")
+			self._header_bar.get_title_widget().set_subtitle("")
 		for action in ("stats","toggle-lyrics","back-to-current-album","toggle-search"):
 			self.lookup_action(action).set_enabled(False)
-
-	def _on_size_allocate(self, widget, rect):
-		if not self.is_maximized() and not self._settings.get_property("mini-player"):
-			size=self.get_size()
-			if size != self._size:  # prevent unneeded write operations
-				self._settings.set_int("width", size[0])
-				self._settings.set_int("height", size[1])
-				self._size=size
 
 	def _on_paned_position(self, obj, typestring, key):
 		self._settings.set_int(key, obj.get_position())
@@ -3956,16 +3872,10 @@ class MainWindow(Gtk.ApplicationWindow):
 		if obj.get_property("mini-player"):
 			if self.is_maximized():
 				self.unmaximize()
-			self.resize(1,1)
+#			self.resize(1,1) TODO
 		else:
-			self.resize(self._settings.get_int("width"), self._settings.get_int("height"))
-
-	def _on_cursor_watch(self, obj, typestring):
-		if obj.get_property("cursor-watch"):
-			watch_cursor = Gdk.Cursor(Gdk.CursorType.WATCH)
-			self.get_window().set_cursor(watch_cursor)
-		else:
-			self.get_window().set_cursor(None)
+#			self.resize(self._settings.get_int("width"), self._settings.get_int("height")) TODO
+			pass
 
 	def _on_playlist_pos_changed(self, *args):
 		if self._settings.get_boolean("playlist-right"):
@@ -4000,7 +3910,7 @@ class mpdevil(Gtk.Application):
 	def do_activate(self):
 		if not self._window:  # allow just one instance
 			self._window=MainWindow(self, self._client, self._settings)
-			self._window.connect("delete-event", self._on_delete_event)
+			self._window.connect("destroy", self._on_delete_event)
 			self._window.insert_action_group("mpd", MPDActionGroup(self._client))
 			# accelerators
 			action_accels=(
@@ -4017,8 +3927,6 @@ class mpdevil(Gtk.Application):
 			)
 			for action, accels in action_accels:
 				self.set_accels_for_action(action, accels)
-			# disable item activation on space key pressed in treeviews
-			Gtk.binding_entry_remove(Gtk.binding_set_find('GtkTreeView'), Gdk.keyval_from_name("space"), Gdk.ModifierType.MOD2_MASK)
 		self._window.present()
 
 	def do_startup(self):
@@ -4039,8 +3947,6 @@ class mpdevil(Gtk.Application):
 
 	def _on_about(self, action, param):
 		dialog=AboutDialog(self._window)
-		dialog.run()
-		dialog.destroy()
 
 	def _on_quit(self, action, param):
 		if self._settings.get_boolean("stop-on-quit") and self._client.connected():
