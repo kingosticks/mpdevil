@@ -1900,42 +1900,43 @@ class SearchWindow(Gtk.Box):
 		else:
 			app.set_accels_for_action("mpd.toggle-play", ["space"])
 
-class GenreSelect(Gtk.ComboBoxText):
+class GenreSelect(Gtk.DropDown):
 	__gsignals__={"genre_changed": (GObject.SignalFlags.RUN_FIRST, None, ())}
 	def __init__(self, client):
-		super().__init__(hexpand=True) #TODO wrap_width=3)
+		super().__init__(hexpand=True)
+		self._string_list=Gtk.StringList()
+		self.set_model(self._string_list)
 		self._client=client
 
 		# connect
-		self._changed=self.connect("changed", self._on_changed)
+		self._changed=self.connect("notify::selected", self._on_selected_changed)
 		self._client.emitter.connect("disconnected", self._on_disconnected)
 		self._client.emitter.connect("reconnected", self._on_reconnected)
 		self._client.emitter.connect("update", self._refresh)
 
 	def deactivate(self):
-		self.set_active(0)
+		self.set_selected(0)
 
 	def _clear(self, *args):
 		self.handler_block(self._changed)
-		self.remove_all()
+		for i in range(len(self._string_list)):
+			self._string_list.remove(0)
 		self.handler_unblock(self._changed)
 
 	def get_selected_genre(self):
-		if self.get_active() == 0:
+		if self.get_property("selected") == 0:
 			return None
 		else:
-			return self.get_active_text()
+			return self._string_list.get_string(self.get_property("selected"))
 
 	def _refresh(self, *args):
-		self.handler_block(self._changed)
-		self.remove_all()
-		self.append_text(_("all genres"))
+		self._clear()
+		self._string_list.append(_("all genres"))
 		for genre in self._client.comp_list("genre"):
-			self.append_text(genre)
-		self.set_active(0)
-		self.handler_unblock(self._changed)
+			self._string_list.append(genre)
+		self.set_selected(0)
 
-	def _on_changed(self, *args):
+	def _on_selected_changed(self, obj, typestring):
 		self.emit("genre_changed")
 
 	def _on_disconnected(self, *args):
