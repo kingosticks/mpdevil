@@ -2155,20 +2155,23 @@ class PlaylistView(TreeView):
 		self._playlist_version=None
 		self._inserted_path=None  # needed for drag and drop
 
+		# rest label
+		self.label=Gtk.Label(halign=Gtk.Align.CENTER, valign=Gtk.Align.END)
+
 		# selection
 		self._selection=self.get_selection()
 		self._selection.set_select_function(self._select_function)
 
 		# store
-		# (track, title, duration, file, search)
-		self._store=Gtk.ListStore(str, str, str, str, str)
+		# (track, title, duration, file, search, raw duration)
+		self._store=Gtk.ListStore(str, str, str, str, str, float)
 		self.set_model(self._store)
 
 		# columns
 		renderer_text=Gtk.CellRendererText(ellipsize=Pango.EllipsizeMode.END, ellipsize_set=True)
 		attrs=Pango.AttrList()
 		attrs.insert(Pango.AttrFontFeatures.new("tnum 1"))
-		renderer_text_ralign_tnum=Gtk.CellRendererText(xalign=1, attributes=attrs)
+		renderer_text_ralign_tnum=Gtk.CellRendererText(xalign=1, alignment=Pango.Alignment.RIGHT, attributes=attrs)
 		renderer_text_centered_tnum=Gtk.CellRendererText(xalign=0.5, attributes=attrs)
 		columns=(
 			Gtk.TreeViewColumn(_("No"), renderer_text_centered_tnum, text=0),
@@ -2236,20 +2239,31 @@ class PlaylistView(TreeView):
 		self._store.handler_unblock(self._row_inserted)
 		self._store.handler_unblock(self._row_deleted)
 
+	def _update_rest_time(self, path):
+		int_path=path.get_indices()[0]
+		duration=Duration(sum((row[5] for i, row in enumerate(self._store) if i > int_path)))
+		self.label.set_markup(f"<small>↓{duration}</small>")
+
+	def _unset_rest_time(self, path):
+		return
+		self._store.set(self._store.get_iter(path), 2, self._store[path][2].split("\n")[0])
+
 	def _select(self, path):
 		self._unselect()
 		try:
 			self.set_property("selected-path", path)
+			self._update_rest_time(path)
 			self._selection.select_path(path)
-		except IndexError:  # invalid path
+		except (IndexError, ValueError):  # invalid path  # TODO
 			pass
 
 	def _unselect(self):
 		if (path:=self.get_property("selected-path")) is not None:
 			self.set_property("selected-path", None)
 			try:
+				self._unset_rest_time(path)
 				self._selection.unselect_path(path)
-			except IndexError:  # invalid path
+			except (IndexError, ValueError):  # invalid path  # TODO
 				pass
 
 	def _delete(self, path):
@@ -2330,12 +2344,14 @@ class PlaylistView(TreeView):
 				try:
 					treeiter=self._store.get_iter(song["pos"])
 				except ValueError:
-					self._store.insert_with_valuesv(-1, range(5),
-						[song["track"][0], title, str(song["duration"]), song["file"], song["title"][0]]
-					)
+					self._store.insert_with_valuesv(-1, range(6), [
+						song["track"][0], title, str(song["duration"]),
+						song["file"], song["title"][0], float(song["duration"])
+					])
 				else:
 					self._store.set(treeiter,
-						0, song["track"][0], 1, title, 2, str(song["duration"]), 3, song["file"], 4, song["title"][0]
+						0, song["track"][0], 1, title, 2, str(song["duration"]),
+						3, song["file"], 4, song["title"][0], 5, float(song["duration"])
 					)
 			self.thaw_child_notify()
 		for i in reversed(range(int(self._client.status()["playlistlength"]), len(self._store))):
@@ -2378,6 +2394,13 @@ class PlaylistWindow(Gtk.Overlay):
 		)
 		self._treeview=PlaylistView(client, settings)
 		scroll=Gtk.ScrolledWindow(child=self._treeview)
+
+		self._provider=Gtk.CssProvider()
+		self._provider.load_from_data(b"label {  padding: 1px;background-color: @theme_base_color;border-width: 1px;border-style: solid solid none;border-color: @borders;border-radius: 8px 8px 0 0;}")  # red icon
+
+		self._treeview.label.get_style_context().add_provider(self._provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+		self.add_overlay(self._treeview.label)
 
 		# connect
 		self._back_to_current_song_button.connect("clicked", self._on_back_to_current_song_button_clicked)
