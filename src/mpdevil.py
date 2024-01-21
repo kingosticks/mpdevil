@@ -1446,7 +1446,7 @@ class Artist(GObject.Object):
 		self.section_name=section_name
 		self.section_start=section_start
 
-class ArtistSelectionModel(ListModel, Gtk.SelectionModel, Gtk.SectionModel):
+class ArtistSelectionModel(ListModel, Gtk.SelectionModel):#, Gtk.SectionModel):
 	__gsignals__={"selected": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
 			"reselected": (GObject.SignalFlags.RUN_FIRST, None, ()),
 			"clear": (GObject.SignalFlags.RUN_FIRST, None, ())}
