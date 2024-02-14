@@ -825,8 +825,10 @@ class Client(MPDClient):
 			return None
 
 	def get_absolute_path(self, uri):
+		print("absolute path for:", uri)
 		if self.music_directory is not None:
 			path=re.sub(r"(.*\.cue)\/track\d+$", r"\1", os.path.join(self.music_directory, uri), flags=re.IGNORECASE)
+			print("absolute path:", path)
 			if os.path.isfile(path):
 				return path
 			else:
@@ -838,7 +840,8 @@ class Client(MPDClient):
 		try:
 			self._bus.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "StartServiceByName",
 				GLib.Variant("(su)",("org.freedesktop.FileManager1",0)), GLib.VariantType("(u)"), Gio.DBusCallFlags.NONE, -1, None)
-		except GLib.GError:
+		except GLib.GError as e:
+			print("dbus error:", e)
 			return False
 		return self.get_absolute_path(uri) is not None
 
